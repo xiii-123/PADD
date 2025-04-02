@@ -1,1 +1,0 @@
-/usr/bin/c++     CMakeFiles/padd_01.dir/src/main.cpp.o CMakeFiles/padd_01.dir/src/padd_01.cpp.o CMakeFiles/padd_01.dir/src/utils.cpp.o  -o bin/padd_01  -lpbc -lgmp -lcrypto -lstdc++fs 

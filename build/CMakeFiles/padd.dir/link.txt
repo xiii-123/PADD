@@ -1,1 +1,0 @@
-/usr/bin/c++     CMakeFiles/padd.dir/test/test.cpp.o CMakeFiles/padd.dir/src/padd_01.cpp.o CMakeFiles/padd.dir/src/utils.cpp.o  -o padd   -L/home/wyh/.local/lib 

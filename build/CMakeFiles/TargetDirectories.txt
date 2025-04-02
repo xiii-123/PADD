@@ -1,3 +1,0 @@
-/home/wyh/POS/PADD/PADD01/build/CMakeFiles/rebuild_cache.dir
-/home/wyh/POS/PADD/PADD01/build/CMakeFiles/edit_cache.dir
-/home/wyh/POS/PADD/PADD01/build/CMakeFiles/padd_01.dir
