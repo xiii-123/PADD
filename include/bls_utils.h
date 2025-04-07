@@ -39,8 +39,6 @@ typedef struct {
 // Function declarations
 element_t* sig_init();
 
-void sig_clear(element_t *sig);
-
 void sign_message(element_t sk, std::string message, element_t sig);
 
 int verify_signature(element_t sig, element_t g, element_t public_key, std::string message);

@@ -18,6 +18,8 @@ void print_vector_as_hex(const std::vector<char>& vec) {
 }
 
 int main() {
+    size_t shard_size = 512;
+
     bls_pkc *pkc = key_gen();
     element_printf("sk: %B\npk: %B\ng: %B\n", pkc->sk->ssk, pkc->pk->spk, pkc->g);
 
@@ -25,11 +27,11 @@ int main() {
     std::string s1 = "hello,world!";
     sign_message(pkc->sk->ssk, s1, *sig);
 
-    // printf("产生签名\n"); 
-    // element_printf("sig: %B\n", sig);
+    printf("产生签名\n"); 
+    element_printf("sig: %B\n", sig);
 
     int result = verify_signature(*sig, pkc->g, pkc->pk->spk, s1);
-    // printf("验证签名:%d\n", result);
+    printf("验证签名:%d\n", result);
 
     std::string filePath = "../data/hello.txt";
     std::fstream f(filePath, std::ios::binary|std::ios::in);
@@ -38,7 +40,7 @@ int main() {
         return 1;
     }
 
-    auto [pair_result, phi] = sig_gen(*pkc, fs::absolute(filePath).string(), f, 4096);
+    auto [pair_result, phi] = sig_gen(*pkc, fs::absolute(filePath).string(), f, shard_size);
     auto [t, mht_sig] = pair_result;
     std::cout << "t:" << t << std::endl;
 
@@ -50,40 +52,23 @@ int main() {
     // }
 
     auto[flag, u] = deserialize_t(t, pkc->g, pkc->pk->spk);
-    if (!false){
-        element_printf("u in main: %B\n", u);
-    }
 
     auto chal = gen_chal(1);
 
-    for (auto i : chal){
-        element_printf("v_i in chal: %B\n", i.second);
-    }
+    // for (auto i : chal){
+    //     element_printf("v_i in chal: %B\n", i.second);
+    // }
    
-
-    for (int i = 0; i < chal.size(); i++){
-        std::cout << chal[i].first << std::endl;
-    }
+    // for (int i = 0; i < chal.size(); i++){
+    //     std::cout << chal[i].first << std::endl;
+    // }
     auto nums = extract_first(chal);
 
-    
-    
-     // 使用解析结果
-    // for (const auto& pair : parsed) {
-    //     std::cout << "in main---" << "num:" << pair.first;
-    //     element_printf(", random: %B\n", pair.second);
-    // }
-
-    auto merkle_root = calculate_merkle_root(f, 4096);
+    auto merkle_root = calculate_merkle_root(f, shard_size);
     // std::cout << "merkle root: ";
     // print_vector_as_hex(merkle_root);
 
-    // std::vector<size_t> nums = {0, 1};
-    
-
-    auto shard_pairs = calculate_merkle_proof(f, nums, 4096);
-
-
+    auto merkle_proof = calculate_merkle_proof(f, nums, shard_size);
 
     // std::cout << "merkle proof: \n";
     // for (int i = 0; i < shard_pairs.first.size(); i++){
@@ -95,26 +80,27 @@ int main() {
     //     }
     // }
 
-    auto[merkle_result_1, merkle_root_1] = verify_merkle_proof(shard_pairs.second, nums);
+    auto[merkle_result_1, merkle_root_1] = verify_merkle_proof(merkle_proof.second, nums);
+    // auto[merkle_result_1, merkle_root_1] = verify_merkle_proof(merkle_proof, nums);
     std::cout << "result: " << merkle_result_1 << std::endl;
 
-
-    auto proof = gen_proof(f, std::move(phi), chal, mht_sig, nums, 4096);
+    auto proof = gen_proof(f, std::move(phi), chal, mht_sig, nums, shard_size);
 
 
     element_printf("mu: %B\n", proof.mu);
     element_printf("sigma: %B\n", proof.sigma);
-    auto[merkle_result_2, merkle_root_2] = verify_merkle_proof(proof.shard_proofs.second, nums);
-    std::cout << "result: " << merkle_result_2 << std::endl;
     element_printf("sig: %B\n", proof.sig_mht);
 
     auto result3 = verify(*pkc, chal, proof, *u);
 
-    
-
     std::cout << "verify success: "<< result3 << std::endl;
 
-    sig_clear(sig);
+    free_chal(chal);
+    free_phi(phi);
+    free_element_ptr(sig);
+    free_element_ptr(mht_sig);
+    free_merkle_proof(merkle_proof);
+    free_element_ptr(u);
     padd_clear(pkc);
 
     return 0;

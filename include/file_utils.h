@@ -5,9 +5,11 @@
 #include <string>
 #include <shared_mutex>
 #include "bls_utils.h"
+#include <iostream>
 
 extern std::shared_mutex FILE_RW_MUTEX;
 const long DEFAULT_SHARD_SIZE = 1024 * 1024 * 4;
+
 
 // File utility functions
 
@@ -60,6 +62,10 @@ std::pair<bool, std::vector<char>>
 verify_merkle_proof(const std::vector<std::vector<std::vector<char>>>& proofs,
                    const std::vector<size_t>& indices);
 
+// std::pair<bool, std::vector<char>> 
+// verify_merkle_proof(const MerkleProof& proof,
+//                     const std::vector<size_t>& indices);
+
 /**
  * @brief 计算Merkle证明
  * 
@@ -75,6 +81,8 @@ verify_merkle_proof(const std::vector<std::vector<std::vector<char>>>& proofs,
 std::pair<std::vector<element_t*>, std::vector<std::vector<std::vector<char>>>> 
 calculate_merkle_proof(std::fstream& file, const std::vector<size_t>& indices, size_t shard_size);
 
+// MerkleProof calculate_merkle_proof(std::fstream& file, const std::vector<size_t>& indices, size_t shard_size);
+
 /**
  * @brief 获取文件的大小和分片数量
  * 
@@ -87,3 +95,5 @@ calculate_merkle_proof(std::fstream& file, const std::vector<size_t>& indices, s
  *         - second: 根据指定分片大小计算得出的分片数量
  */
 std::pair<size_t, size_t> get_file_size_and_shard_count(std::fstream& file, size_t shard_size);
+
+void free_merkle_proof(std::pair<std::vector<element_t*>, std::vector<std::vector<std::vector<char>>>>& merkle_proof);

@@ -31,19 +31,69 @@ pairing_t PAIRING;
 namespace fs = std::filesystem;
 
 Proof::Proof(element_t* mu, element_t* sigma, 
-    std::pair<std::vector<element_t*>, std::vector<std::vector<std::vector<char>>>> shard_proofs, 
-    element_t* sig_mht, std::vector<size_t> indices){
+    std::pair<std::vector<element_t*>, std::vector<std::vector<std::vector<char>>>> &merkle_proofs, 
+    element_t* sig_mht, std::vector<size_t> indices)
+{
     element_init_same_as(this->mu, *mu);
     element_set(this->mu, *mu);
     element_init_same_as(this->sigma, *sigma);
     element_set(this->sigma, *sigma);
-    this->shard_proofs = shard_proofs;
+    // this->merkle_proofs = merkle_proofs;
+
+    const auto& [req_elems, proofs] = merkle_proofs;
+
+    this->merkle_proofs.second = proofs;
+
+    for (element_t* elem : req_elems) {
+        element_t* new_elem = (element_t*)malloc(sizeof(element_t));
+        if (!new_elem) throw std::bad_alloc();
+        
+        element_init_same_as(*new_elem, *elem);
+        element_set(*new_elem, *elem);
+        this->merkle_proofs.first.push_back(new_elem);
+    }
+
     element_init_same_as(this->sig_mht, *sig_mht);
     element_set(this->sig_mht, *sig_mht);
     this->indices = indices;
 }
 
 Proof::Proof(){}
+
+Proof::~Proof() {
+    // Clean up mu
+    if (mu != NULL) {
+        element_clear(mu);
+    }
+
+
+    // Clean up sigma
+    if (sigma != NULL) {
+        element_clear(sigma);
+    }
+
+
+    // Clean up sig_mht
+    if (sig_mht != NULL) {
+        element_clear(sig_mht);
+    }
+
+    // Clean up shard_proofs.first (vector of element_t*)
+    for (element_t* elem : merkle_proofs.first) {
+        if (elem != NULL) {
+            element_clear(*elem);
+            free(elem);
+        }
+    }
+    merkle_proofs.first.clear();
+
+    // shard_proofs.second is vector<vector<vector<char>>> which doesn't need manual cleanup
+    merkle_proofs.second.clear();
+
+    // indices is vector<size_t> which doesn't need manual cleanup
+    indices.clear();
+
+}
 
 void padd_init(element_t pk, element_t sk, element_t g) {
     pairing_init_set_buf(PAIRING, TYPEA_PARAMS, sizeof(TYPEA_PARAMS));
@@ -77,10 +127,16 @@ void padd_clear(bls_pkc* pkc) {
     element_clear(pkc->sk->ssk);
     element_clear(pkc->sk->alpha);
     element_clear(pkc->g);
-    pairing_clear(PAIRING);
+    // pairing_clear(PAIRING);
     free(pkc->pk);
     free(pkc->sk);
     free(pkc);
+}
+
+element_t* sig_init(){
+    element_t* sig = (element_t*)malloc(sizeof(element_t));
+    element_init_G1(*sig, PAIRING);
+    return sig;
 }
 
 std::string construct_t(bls_pkc& pkc, const std::string& file_name, size_t n,  element_t u) {
@@ -110,12 +166,12 @@ std::string construct_t(bls_pkc& pkc, const std::string& file_name, size_t n,  e
         // 追加签名到结果
         t.append(sig_buf.data());
     } catch (...) {
-        sig_clear(sig); // 确保在异常情况下清理资源
+        free_element_ptr(sig); // 确保在异常情况下清理资源
         throw;
     }
 
     // 清理资源
-    sig_clear(sig);
+    free_element_ptr(sig);
     return t;
 }
 
@@ -132,7 +188,7 @@ void calculate_sigma(std::fstream& f, size_t start, size_t num, bls_pkc& pkc, el
     element_init_Zr(m,PAIRING);
 
     element_from_hash(temp, buffer.data(), buffer.size());
-    element_printf("H_mi first: %B\n", temp);
+    // element_printf("H_mi first: %B\n", temp);
 
     element_set_si(m, vector_to_ulong(buffer));
     element_pow_zn(u_m, u, m);
@@ -276,6 +332,21 @@ std::shared_ptr<std::vector<element_t*>> deserialize_phi(const std::vector<char>
     return phi;
 }
 
+void free_phi(std::shared_ptr<std::vector<element_t*>>& phi) {
+    if (!phi) return;  // Early return if null
+    
+    for (element_t* elem : *phi) {
+        if (elem != nullptr) {
+            element_clear(*elem);  // Clear the PBC element
+            free(elem);            // Free the allocated memory
+        }
+    }
+    phi->clear();  // Clear the vector
+    
+    // Reset the shared_ptr (not strictly necessary as it will decrement refcount)
+    phi.reset();
+}
+
 std::pair<std::pair<std::string, element_t*>, std::shared_ptr<std::vector<element_t*>>> 
 sig_gen(bls_pkc& pkc, std::string file_name, std::fstream& f, size_t shard_size = DEFAULT_SHARD_SIZE) {
     auto[file_size, shard_num] = get_file_size_and_shard_count(f, shard_size);
@@ -321,7 +392,7 @@ std::vector<std::string> extract_parts(const std::string& input) {
     return parts;
 }
 
- std::pair<bool, element_t*> deserialize_t(std::string t, element_t g, element_t pk){
+std::pair<bool, element_t*> deserialize_t(std::string t, element_t g, element_t pk){
     // 1, 拆分t
     auto t_sub = extract_parts(t);
     if (t_sub.size() != 3) return std::make_pair(false, nullptr);
@@ -330,7 +401,7 @@ std::vector<std::string> extract_parts(const std::string& input) {
     element_init_G1(sig, PAIRING);
     element_set_str(sig, t_sub[2].c_str(), 10);
 
-    element_printf("sig: %B\n", sig);
+    // element_printf("sig: %B\n", sig);
 
     // 2， 验证签名
     int result = verify_signature(sig, g, pk, t_sub[0]+t_sub[1]);
@@ -346,10 +417,15 @@ std::vector<std::string> extract_parts(const std::string& input) {
     return std::make_pair(true, u);
 }
 
-#include <vector>
-#include <algorithm>
-#include <random>
-#include <chrono>
+void free_element_ptr(element_t* t){
+    if (t == nullptr){
+        return;
+    }
+    element_clear(*t);
+    free(t);
+    return;
+}
+
 
 std::vector<size_t> select_random_numbers(size_t n, size_t k = 0) {
     // 处理特殊情况：n=1时总是返回{0}
@@ -389,107 +465,6 @@ std::vector<size_t> select_random_numbers(size_t n, size_t k = 0) {
     return numbers;
 }
 
-// std::vector<size_t> select_random_numbers(size_t n, size_t k = 0) {
-//     if (n == 1){
-//         k = 1;
-//     }
-
-//     // 设置默认k值为n/2
-//     if (k == 0) {
-//         k = n / 2;
-//     }
-    
-//     // 参数检查
-//     if (n <= 0 || k <= 0 || k > n) {
-//         return {};
-//     }
-    
-//     // 创建包含1到n的向量
-//     std::vector<size_t> numbers(n);
-//     for (size_t i = 0; i < n; ++i) {
-//         numbers[i] = i + 1;
-//     }
-    
-//     // 使用随机设备获取种子
-//     unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
-    
-//     // 随机打乱向量
-//     std::shuffle(numbers.begin(), numbers.end(), std::default_random_engine(seed));
-    
-//     // 取前k个元素
-//     numbers.resize(k);
-    
-//     // 排序结果
-//     std::sort(numbers.begin(), numbers.end());
-    
-//     return numbers;
-// }
-
-
-// std::vector<std::pair<size_t, element_t*>> parse_chal(const std::vector<char>& chal) {
-//     std::vector<std::pair<size_t, element_t*>> result;
-//     size_t i = 0;
-    
-//     while (i < chal.size()) {
-//         // 1. 解析数字部分（作为ASCII字符串）
-//         std::string num_str;
-//         while (i < chal.size() && chal[i] != ',') {
-//             num_str += chal[i++];
-//         }
-//         i++; // 跳过逗号
-
-//         size_t num = std::stoul(num_str); // 转为整数
-
-//         // 2. 解析元素部分
-//         element_t* elem = (element_t*)malloc(sizeof(element_t));
-//         element_init_Zr(*elem, PAIRING);
-        
-//         unsigned char temp[20];
-//         for (int j = 0; j < sizeof(temp) && i < chal.size(); j++) {
-//             temp[j] = chal[i++];
-//         }
-//         element_from_bytes(*elem, temp);
-        
-//         i++; // 跳过分号
-
-//         result.emplace_back(num, elem);
-//     }
-//     return result;
-// }
-
-// std::vector<char> gen_chal(size_t n){
-//     // 1, 获取随机数
-//     auto nums = select_random_numbers(n);
-
-//     std::vector<char> res;
-//     element_t random;
-//     unsigned char temp[20];
-//     element_init_Zr(random, PAIRING);
-
-//     //2, 为每一个随机数获取一个随机元素
-//     for (auto num : nums){
-//         std::string num_str = std::to_string(num);
-//         res.insert(res.end(), num_str.begin(), num_str.end());
-//         res.push_back(',');
-
-//         element_random(random);
-//         element_to_bytes(temp, random);
-
-//         // 输出部分
-//         // std::cout << "in gen_chal---" << "num:" << num;
-//         // element_printf(", random: %B\n", random);
-        
-//         for (int i = 0; i < sizeof(temp); i++) {
-//             res.push_back(temp[i]);
-//         }
-//         res.push_back(';');
-//     }
-//     element_clear(random);
-
-//     //3，打包并返回
-//     return res;
-// }
-
 // 生成挑战，直接返回pair向量
 std::vector<std::pair<size_t, element_t*>> gen_chal(size_t n) {
 
@@ -525,6 +500,17 @@ std::vector<std::pair<size_t, element_t*>> gen_chal(size_t n) {
     }
     
     return challenges;
+}
+
+void free_chal(std::vector<std::pair<size_t, element_t*>>& challenges) {
+    for (auto& [num, elem] : challenges) {
+        if (elem != nullptr) {
+            element_clear(*elem);  // Clear the PBC element
+            free(elem);           // Free the allocated memory
+            elem = nullptr;       // Set pointer to null
+        }
+    }
+    challenges.clear();  // Clear the vector
 }
 
 // 将挑战序列化为字节流
@@ -691,6 +677,7 @@ element_t* calculate_proof_sigma(
     return sigma;
 }
 
+
 std::vector<size_t> extract_first(const std::vector<std::pair<size_t, element_t*>>& chal) {
     std::vector<size_t> result;
     result.reserve(chal.size()); // 预分配空间以提高效率
@@ -708,12 +695,14 @@ Proof gen_proof(std::fstream& f,
 ){
     element_t* mu = calculate_proof_mu(chal, f, shard_size);
     element_t* sigma = calculate_proof_sigma(chal, phi);
-    auto shard_proofs = calculate_merkle_proof(f, extract_first(chal), shard_size);
-    return Proof(mu, sigma, shard_proofs, sig_mht, indices);
-    return Proof();
+    auto merkle_proof = calculate_merkle_proof(f, extract_first(chal), shard_size);
+    // element_printf("merkle_proof的merkle_proof： %B\n", merkle_proof.requested_elements[0]);
+    auto proof = Proof(mu, sigma, merkle_proof, sig_mht, indices);
+    // element_printf("gen_proof的merkle_proof： %B\n", proof.shard_proofs.requested_elements[0]);
+    return Proof(mu, sigma, merkle_proof, sig_mht, indices);
 }
 
-bool authentication(Proof proof, bls_pkc& pkc){
+bool authentication(Proof &proof, bls_pkc& pkc){
     element_t temp1, temp2;
     element_t g_alpha;
     element_t hash_mht;
@@ -724,7 +713,9 @@ bool authentication(Proof proof, bls_pkc& pkc){
     element_init_GT(temp1, PAIRING);
     element_init_GT(temp2, PAIRING);
 
-    auto[flag, hash_mht_vector] = verify_merkle_proof(proof.shard_proofs.second, proof.indices);
+    auto[flag, hash_mht_vector] = verify_merkle_proof(proof.merkle_proofs.second, proof.indices);
+
+
     if (!flag) return false;
     element_from_hash(hash_mht, hash_mht_vector.data(), hash_mht_vector.size());
 
@@ -743,7 +734,7 @@ bool authentication(Proof proof, bls_pkc& pkc){
 element_t* calculate_product_proof(
     const std::vector<element_t*>& m_hashes,  // H(m_i) 的向量
     const std::vector<std::pair<size_t, element_t*>>& chal) {  // 挑战对 (s_i, ν_i)
-    
+
     // 参数检查
     if (m_hashes.empty() || chal.empty()) {
         throw std::invalid_argument("Input vectors cannot be empty");
@@ -765,10 +756,10 @@ element_t* calculate_product_proof(
         for (size_t i = 0; i < chal.size(); ++i) {
             // 获取当前项的 ν_i
             element_t* nu_i = chal[i].second;
-            
+
             // 计算 H(m_i)^{ν_i}
             element_pow_zn(temp, *m_hashes[i], *nu_i);
-            element_printf("H_mi last: %B\n", *m_hashes[i]);
+            // element_printf("H_mi last: %B\n", *m_hashes[i]);
             
             // 累乘到结果
             element_mul(*result, *result, temp);
@@ -784,19 +775,19 @@ element_t* calculate_product_proof(
     // 清理临时变量
     element_clear(temp);
 
+
     return result;
 }
 
 bool verify(bls_pkc& pkc, 
     std::vector<std::pair<size_t, element_t*>>& chal, 
-    Proof proof,
+    Proof &proof,
     element_t u
 ){  
     // std::cout << "authentication: " << authentication(proof, pkc) << std::endl;
     // 1. merkle hash root 验证以及身份验证
     if (!authentication(proof, pkc)) return false;
-
-    element_printf("u: %B\n", u);
+    // element_printf("u: %B\n", u);
 
     // 2. 证明验证
     element_t temp1, temp2;
@@ -807,8 +798,7 @@ bool verify(bls_pkc& pkc,
     element_init_G1(temp3, PAIRING);
 
     element_pairing(temp1, proof.sigma, pkc.g);
-
-    auto temp4 = calculate_product_proof(proof.shard_proofs.first, chal);
+    auto temp4 = calculate_product_proof(proof.merkle_proofs.first, chal);
     element_pow_zn(temp3, u, proof.mu);
     element_mul(temp3, *temp4, temp3);
 
