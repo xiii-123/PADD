@@ -40,7 +40,11 @@ int main() {
         return 1;
     }
 
-    auto [pair_result, phi] = sig_gen(*pkc, fs::absolute(filePath).string(), f, shard_size);
+    MerkleTree tree;
+    tree.build_from_file(f, shard_size);
+    auto merkle_root = tree.get_root_hash();
+
+    auto [pair_result, phi] = sig_gen(*pkc, fs::absolute(filePath).string(), f, tree, shard_size);
     auto [t, mht_sig] = pair_result;
     std::cout << "t:" << t << std::endl;
 
@@ -53,10 +57,10 @@ int main() {
 
     auto[flag, u] = deserialize_t(t, pkc->g, pkc->pk->spk);
 
-    auto chal = gen_chal(1);
+    auto chal = gen_chal(4);
 
     // for (auto i : chal){
-    //     element_printf("v_i in chal: %B\n", i.second);
+    //     element_printf("v_%d in chal: %B\n",i.first, i.second);
     // }
    
     // for (int i = 0; i < chal.size(); i++){
@@ -64,11 +68,14 @@ int main() {
     // }
     auto nums = extract_first(chal);
 
-    auto merkle_root = calculate_merkle_root(f, shard_size);
+    // auto merkle_root = calculate_merkle_root(f, shard_size);
+
+
     // std::cout << "merkle root: ";
     // print_vector_as_hex(merkle_root);
 
-    auto merkle_proof = calculate_merkle_proof(f, nums, shard_size);
+    // auto merkle_proof = calculate_merkle_proof(f, nums, shard_size);
+    auto merkle_proof = tree.batch_get_proofs(nums);
 
     // std::cout << "merkle proof: \n";
     // for (int i = 0; i < shard_pairs.first.size(); i++){
@@ -80,11 +87,12 @@ int main() {
     //     }
     // }
 
-    auto[merkle_result_1, merkle_root_1] = verify_merkle_proof(merkle_proof.second, nums);
-    // auto[merkle_result_1, merkle_root_1] = verify_merkle_proof(merkle_proof, nums);
+    // auto[merkle_result_1, merkle_root_1] = verify_merkle_proof(merkle_proof.second, nums);
+    auto merkle_result_1 = tree.batch_verify_proofs(merkle_proof, merkle_root);
+
     std::cout << "result: " << merkle_result_1 << std::endl;
 
-    auto proof = gen_proof(f, std::move(phi), chal, mht_sig, nums, shard_size);
+    auto proof = gen_proof(f, phi, chal, mht_sig, tree, shard_size);
 
 
     element_printf("mu: %B\n", proof.mu);
@@ -99,7 +107,6 @@ int main() {
     free_phi(phi);
     free_element_ptr(sig);
     free_element_ptr(mht_sig);
-    free_merkle_proof(merkle_proof);
     free_element_ptr(u);
     padd_clear(pkc);
 

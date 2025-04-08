@@ -1,5 +1,5 @@
 #include "bls_utils.h"
-#include "file_utils.h"
+#include "file_utils.hpp"
 #include <openssl/evp.h>
 #include <stdexcept>
 #include <cmath>
@@ -11,13 +11,367 @@
 #include <openssl/sha.h>
 #include <utility>
 
-
-
 // Initialize pairing parameters
 
 std::shared_mutex FILE_RW_MUTEX;
 
 // BLS utility functions implementation
+
+void MerkleNode::compute_hash() {
+    if (is_leaf) return;
+    
+    std::vector<std::byte> combined;
+    if (left) combined.insert(combined.end(), left->hash.begin(), left->hash.end());
+    if (right) combined.insert(combined.end(), right->hash.begin(), right->hash.end());
+    else combined.insert(combined.end(), left->hash.begin(), left->hash.end());
+    
+    hash = sha256(combined);
+    
+    if (auto parent_ptr = parent.lock()) {
+        parent_ptr->compute_hash();
+    }
+}
+
+void MerkleTree::serialize_node(std::ostringstream& oss, const std::shared_ptr<MerkleNode>& node) const {
+    if (!node) {
+        oss << "null ";
+        return;
+    }
+    
+    oss << to_hex(node->hash) << " ";
+    oss << (node->is_leaf ? "1 " : "0 ");
+    serialize_node(oss, node->left);
+    serialize_node(oss, node->right);
+}
+
+std::shared_ptr<MerkleNode> MerkleTree::deserialize_node(std::istringstream& iss) const {
+    std::string hashHex;
+    if (!(iss >> hashHex) || hashHex == "null") {
+        return nullptr;
+    }
+    
+    std::string leafFlag;
+    iss >> leafFlag;
+    bool isLeaf = (leafFlag == "1");
+    
+    auto node = std::make_shared<MerkleNode>(from_hex(hashHex), isLeaf);
+    node->left = deserialize_node(iss);
+    node->right = deserialize_node(iss);
+    
+    if (node->left) node->left->parent = node;
+    if (node->right) node->right->parent = node;
+    
+    return node;
+}
+
+void MerkleTree::collect_leaves(const std::shared_ptr<MerkleNode>& node) {
+    if (!node) return;
+    
+    if (node->is_leaf) {
+        leaves.push_back(node);
+    } else {
+        collect_leaves(node->left);
+        collect_leaves(node->right);
+    }
+}
+
+std::vector<std::pair<std::string, bool>> MerkleTree::get_proof(size_t index) const {
+    if (index >= leaves.size()) {
+        throw std::out_of_range("Leaf index out of range");
+    }
+
+    std::vector<std::pair<std::string, bool>> proof; // pair of (hash, isLeft)
+    auto node = leaves[index];
+    auto parent = node->parent.lock();
+    if (parent->left && parent->left == node){
+        proof.emplace_back(to_hex(node->hash), true);
+    } else{
+        proof.emplace_back(to_hex(node->hash), false);
+    }
+
+    while (parent) {
+        if (parent->left && parent->left != node) {
+            // 当前节点是右孩子，所以兄弟是左孩子
+            proof.emplace_back(to_hex(parent->left->hash), true);
+        } else if (parent->right && parent->right != node) {
+            // 当前节点是左孩子，所以兄弟是右孩子
+            proof.emplace_back(to_hex(parent->right->hash), false);
+        }
+        node = parent;
+        parent = node->parent.lock();
+    }
+
+    return proof;
+}
+
+std::shared_ptr<MerkleNode> MerkleTree::build_tree(const std::vector<std::shared_ptr<MerkleNode>>& nodes) {
+    if (nodes.empty()) return nullptr;
+    if (nodes.size() == 1) return nodes[0];
+
+    std::vector<std::shared_ptr<MerkleNode>> parents;
+    for (size_t i = 0; i < nodes.size(); i += 2) {
+        if (i + 1 < nodes.size()) {
+            parents.push_back(MerkleNode::create_node(nodes[i], nodes[i+1]));
+        } else {
+            parents.push_back(MerkleNode::create_node(nodes[i], nullptr));
+        }
+    }
+    return build_tree(parents);
+}
+
+bool MerkleTree::verify_proof(const std::vector<std::pair<std::string, bool>>& proof, 
+    const std::string& rootHash) {
+    std::vector<std::byte> currentHash = from_hex(proof[0].first);
+
+    for (int i = 1; i < proof.size(); i++) {
+
+    std::vector<std::byte> proofHash = from_hex(proof[i].first);
+    std::vector<std::byte> combined;
+
+    // 根据证明中的位置信息决定组合顺序
+    if (proof[i].second) {
+        // 证明节点是左兄弟，所以应该放在前面
+        combined.insert(combined.end(), proofHash.begin(), proofHash.end());
+        combined.insert(combined.end(), currentHash.begin(), currentHash.end());
+    } else {
+        // 证明节点是右兄弟，所以应该放在后面
+        combined.insert(combined.end(), currentHash.begin(), currentHash.end());
+        combined.insert(combined.end(), proofHash.begin(), proofHash.end());
+    }
+
+    currentHash = sha256(combined);
+    }
+
+    return to_hex(currentHash) == rootHash;
+}
+
+std::unordered_map<size_t, std::vector<std::pair<std::string, bool>>> 
+MerkleTree::batch_get_proofs(const std::vector<size_t>& indices) const {
+    std::unordered_map<size_t, std::vector<std::pair<std::string, bool>>> proofs;
+    
+    for (size_t index : indices) {
+        if (index >= leaves.size()) {
+            throw std::out_of_range("Leaf index " + std::to_string(index) + 
+                                    " out of range [0-" + 
+                                    std::to_string(leaves.size()-1) + "]");
+        }
+        proofs[index] = get_proof(index);
+    }
+    
+    return proofs;
+}
+
+bool MerkleTree::batch_verify_proofs(const std::unordered_map<size_t, 
+std::vector<std::pair<std::string, bool>>>& proofs, std::string root_hash) {
+    std::unordered_map<size_t, bool> results;
+    for (const auto& [index, proof] : proofs) {
+        if (!verify_proof(proof, root_hash)){return false;}
+    }
+
+    return true;
+}
+
+std::string MerkleTree::serialize_proof(const std::vector<std::pair<std::string, bool>>& proof) const {
+    std::ostringstream oss;
+    for (const auto& p : proof) {
+        oss << p.first << ":" << (p.second ? "1" : "0") << " ";
+    }
+    return oss.str();
+}
+
+std::vector<std::pair<std::string, bool>> MerkleTree::deserialize_proof(const std::string& serialized) {
+    std::vector<std::pair<std::string, bool>> proof;
+    std::istringstream iss(serialized);
+    std::string item;
+    
+    while (iss >> item) {
+        size_t colon_pos = item.find(':');
+        if (colon_pos == std::string::npos) {
+            throw std::runtime_error("Invalid proof format");
+        }
+        
+        std::string hash = item.substr(0, colon_pos);
+        bool isLeft = (item.substr(colon_pos + 1) == "1");
+        proof.emplace_back(hash, isLeft);
+    }
+    
+    return proof;
+}
+
+std::string MerkleTree::serialize_batch_proofs(const std::unordered_map<size_t, std::vector<std::pair<std::string, bool>>>& proofs) {
+    std::ostringstream oss;
+    oss << proofs.size() << "|";  // Header with proof count
+    
+    for (const auto& [index, proof] : proofs) {
+        oss << index << "|" << proof.size() << "|";
+        
+        for (const auto& [hash, isLeft] : proof) {
+            oss << hash << ":" << (isLeft ? '1' : '0') << "|";
+        }
+    }
+    
+    return oss.str();
+}
+
+std::unordered_map<size_t, std::vector<std::pair<std::string, bool>>> 
+MerkleTree::deserialize_batch_proofs(const std::string& serialized) {
+    std::unordered_map<size_t, std::vector<std::pair<std::string, bool>>> proofs;
+    std::istringstream iss(serialized);
+    char delim;
+    size_t proof_count;
+    
+    // Read header
+    if (!(iss >> proof_count >> delim) || delim != '|') {
+        throw std::invalid_argument("Invalid serialized format (header)");
+    }
+
+    for (size_t i = 0; i < proof_count; ++i) {
+        // Read index
+        size_t index;
+        if (!(iss >> index >> delim) || delim != '|') {
+            throw std::invalid_argument("Invalid index format");
+        }
+
+        // Read proof length
+        size_t proof_len;
+        if (!(iss >> proof_len >> delim) || delim != '|') {
+            throw std::invalid_argument("Invalid proof length format");
+        }
+
+        // Read proof items
+        std::vector<std::pair<std::string, bool>> proof;
+        proof.reserve(proof_len);
+        
+        for (size_t j = 0; j < proof_len; ++j) {
+            std::string hash;
+            char dir, sep;
+            
+            if (!(iss >> hash >> sep >> dir >> delim) || 
+                sep != ':' || delim != '|') {
+                throw std::invalid_argument("Invalid proof item format");
+            }
+            
+            proof.emplace_back(hash, dir == '1');
+        }
+        
+        proofs[index] = std::move(proof);
+    }
+    
+    return proofs;
+}
+
+std::string MerkleTree::serialize() const {
+    std::ostringstream oss;
+    serialize_node(oss, root);
+    return oss.str();
+}
+
+void MerkleTree::deserialize(const std::string& serialized) {
+    clear();
+    std::istringstream iss(serialized);
+    root = deserialize_node(iss);
+    if (root) {
+        collect_leaves(root);
+    }
+}
+
+void MerkleTree::print_tree() const {
+    if (!root) {
+        std::cout << "Empty tree" << std::endl;
+        return;
+    }
+
+    std::vector<std::shared_ptr<MerkleNode>> current_level;
+    current_level.push_back(root);
+
+    while (!current_level.empty()) {
+        std::vector<std::shared_ptr<MerkleNode>> next_level;
+        for (const auto& node : current_level) {
+            std::cout << to_hex(node->hash).substr(0,16) << " ";
+            if (node->left) next_level.push_back(node->left);
+            if (node->right) next_level.push_back(node->right);
+        }
+        std::cout << std::endl;
+        current_level = next_level;
+    }
+}
+
+void MerkleTree::build_from_file(std::fstream& f, size_t shard_size) {
+    if (!f.is_open()) {
+        throw std::runtime_error("File is not open");
+    }
+
+    // Get file size and calculate number of shards needed
+    auto [file_size, shard_count] = get_file_size_and_shard_count(f, shard_size);
+    
+    if (file_size == 0) {
+        clear();  // Handle empty file case
+        return;
+    }
+
+    std::vector<std::string> shards;
+    shards.reserve(shard_count);  // Pre-allocate for efficiency
+
+    // Read each shard and add to the tree
+    for (size_t i = 0; i < shard_count; ++i) {
+        size_t start_pos = i * shard_size;
+        size_t read_size = (i == shard_count - 1) ? (file_size - start_pos) : shard_size;
+        
+        auto segment = read_file_segment(f, start_pos, read_size);
+        shards.emplace_back(segment.data(), segment.size());
+    }
+    build(shards);
+}
+
+std::string to_hex(const std::vector<std::byte>& hash) {
+    std::stringstream ss;
+    for (std::byte b : hash) {
+        ss << std::hex << std::setw(2) << std::setfill('0') 
+           << static_cast<int>(b);
+    }
+    return ss.str();
+}
+
+std::vector<std::byte> from_hex(const std::string& hexStr) {
+    std::vector<std::byte> result;
+    for (size_t i = 0; i < hexStr.length(); i += 2) {
+        std::string byteStr = hexStr.substr(i, 2);
+        auto byte = static_cast<std::byte>(std::stoi(byteStr, nullptr, 16));
+        result.push_back(byte);
+    }
+    return result;
+}
+
+std::vector<std::byte> sha256(const std::string& str) {
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+    SHA256_CTX sha256;
+    SHA256_Init(&sha256);
+    SHA256_Update(&sha256, str.c_str(), str.size());
+    SHA256_Final(hash, &sha256);
+    
+    std::vector<std::byte> result;
+    result.reserve(SHA256_DIGEST_LENGTH);
+    for (size_t i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
+        result.push_back(static_cast<std::byte>(hash[i]));
+    }
+    return result;
+}
+
+std::vector<std::byte> sha256(const std::vector<std::byte>& data) {
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+    SHA256_CTX sha256;
+    SHA256_Init(&sha256);
+    SHA256_Update(&sha256, data.data(), data.size());
+    SHA256_Final(hash, &sha256);
+    
+    std::vector<std::byte> result;
+    result.reserve(SHA256_DIGEST_LENGTH);
+    for (size_t i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
+        result.push_back(static_cast<std::byte>(hash[i]));
+    }
+    return result;
+}
+
 
 std::pair<size_t, size_t> get_file_size_and_shard_count(std::fstream& file, size_t shard_size = DEFAULT_SHARD_SIZE) {
     if (!file.is_open()) {
@@ -38,456 +392,9 @@ std::pair<size_t, size_t> get_file_size_and_shard_count(std::fstream& file, size
     // 计算分片数量
     size_t num_shards = (file_size + shard_size - 1) / shard_size;
 
-
     return {file_size, num_shards};
 
 }
-
-
-std::pair<std::vector<element_t*>, std::vector<std::vector<std::vector<char>>>> 
-calculate_merkle_proof(std::fstream& file, const std::vector<size_t>& indices, size_t shard_size) {
-
-    if (!file.is_open()) {
-        throw std::runtime_error("File is not open");
-    }
-    if (shard_size <= 0) {
-        throw std::runtime_error("Shard size must be greater than 0");
-    }
-    if (indices.empty()) {
-        throw std::runtime_error("Proof indices cannot be empty");
-    }
-
-    file.seekg(std::ios::beg);
-
-
-    // 1. 获取文件大小并计算分片数量
-    auto[file_size, num_shards] = get_file_size_and_shard_count(file, shard_size);
-
-    // 验证nums中的索引是否有效
-    for (auto num : indices) {
-        if (num >= num_shards) {
-            // file.seekg(original_pos);
-            throw std::runtime_error("Shard index out of range");
-        }
-    }
-
-    // 2. 计算所有叶节点的哈希并存储分片数据
-    std::vector<std::vector<char>> leaf_hashes;
-    std::vector<std::vector<char>> shard_data_list;
-    for (size_t i = 0; i < num_shards; ++i) {
-
-        auto shard_data = read_file_segment(file, i * shard_size, shard_size);
-
-        shard_data_list.push_back(shard_data);
-        
-        unsigned char hash[SHA256_DIGEST_LENGTH];
-        SHA256(reinterpret_cast<const unsigned char*>(shard_data.data()), 
-              shard_data.size(), hash);
-        
-        leaf_hashes.emplace_back(hash, hash + SHA256_DIGEST_LENGTH);
-    }
-
-    if (leaf_hashes.empty()) {
-        // 处理空文件情况
-        unsigned char hash[SHA256_DIGEST_LENGTH];
-        SHA256(reinterpret_cast<const unsigned char*>(""), 0, hash);
-        leaf_hashes.emplace_back(hash, hash + SHA256_DIGEST_LENGTH);
-        shard_data_list.emplace_back(); // 空数据
-    }
-
-    // 3. 创建element_t*列表（请求的分片数据）
-    std::vector<element_t*> requested_elements;
-    for (auto num : indices) {
-        element_t* elem = (element_t*)malloc(sizeof(element_t));
-        element_init_G1(*elem, PAIRING);
-        element_from_hash(*elem, shard_data_list[num].data(), shard_data_list[num].size());
-
-        // element_printf("calculate_merkle_proof H_mi in mid: %B\n", *elem);
-
-        requested_elements.push_back(elem);
-    }
-
-    // 4. 为每个请求的分片构建Merkle证明路径
-    std::vector<std::vector<std::vector<char>>> all_proofs;
-    
-    for (auto num : indices) {
-        std::vector<std::vector<char>> proof_path;
-        
-        // 将请求的块的哈希值作为证明路径的第一个元素
-        proof_path.push_back(leaf_hashes[num]);
-        
-        size_t current_index = num;
-        std::vector<std::vector<char>> current_level = leaf_hashes;
-        
-        while (current_level.size() > 1) {
-            // 确定兄弟节点的位置
-            size_t sibling_index;
-            if (current_index % 2 == 0) {
-                // 当前节点是左节点，取右兄弟
-                sibling_index = current_index + 1;
-            } else {
-                // 当前节点是右节点，取左兄弟
-                sibling_index = current_index - 1;
-            }
-            
-            // 确保兄弟索引不越界
-            if (sibling_index < current_level.size()) {
-                proof_path.push_back(current_level[sibling_index]);
-            } else {
-                // 如果没有兄弟节点（奇数个节点的情况），复制自己
-                proof_path.push_back(current_level[current_index]);
-            }
-            
-            // 构建下一层
-            std::vector<std::vector<char>> next_level;
-            for (size_t i = 0; i < current_level.size(); i += 2) {
-                std::vector<char> combined_hash;
-                
-                if (i + 1 < current_level.size()) {
-                    combined_hash.insert(combined_hash.end(), 
-                                        current_level[i].begin(), 
-                                        current_level[i].end());
-                    combined_hash.insert(combined_hash.end(), 
-                                        current_level[i+1].begin(), 
-                                        current_level[i+1].end());
-                } else {
-                    // 奇数个节点，复制最后一个
-                    combined_hash.insert(combined_hash.end(), 
-                                        current_level[i].begin(), 
-                                        current_level[i].end());
-                    combined_hash.insert(combined_hash.end(), 
-                                        current_level[i].begin(), 
-                                        current_level[i].end());
-                }
-                
-                unsigned char hash[SHA256_DIGEST_LENGTH];
-                SHA256(reinterpret_cast<const unsigned char*>(combined_hash.data()),
-                      combined_hash.size(), hash);
-                next_level.emplace_back(hash, hash + SHA256_DIGEST_LENGTH);
-            }
-            
-            // 更新当前索引为父节点在下一层的位置
-            current_index = current_index / 2;
-            current_level = next_level;
-        }
-        
-        all_proofs.push_back(proof_path);
-    }
-
-    // 恢复文件指针
-    file.seekg(std::ios::beg);
-
-    return {requested_elements, all_proofs};
-}
-
-// MerkleProof calculate_merkle_proof(std::fstream& file, const std::vector<size_t>& indices, size_t shard_size) {
-
-//     if (!file.is_open()) {
-//         throw std::runtime_error("File is not open");
-//     }
-//     if (shard_size <= 0) {
-//         throw std::runtime_error("Shard size must be greater than 0");
-//     }
-//     if (indices.empty()) {
-//         throw std::runtime_error("Proof indices cannot be empty");
-//     }
-
-//     file.seekg(std::ios::beg);
-
-
-//     // 1. 获取文件大小并计算分片数量
-//     auto[file_size, num_shards] = get_file_size_and_shard_count(file, shard_size);
-
-//     // 验证nums中的索引是否有效
-//     for (auto num : indices) {
-//         if (num >= num_shards) {
-//             // file.seekg(original_pos);
-//             throw std::runtime_error("Shard index out of range");
-//         }
-//     }
-
-//     // 2. 计算所有叶节点的哈希并存储分片数据
-//     std::vector<std::vector<char>> leaf_hashes;
-//     std::vector<std::vector<char>> shard_data_list;
-//     for (size_t i = 0; i < num_shards; ++i) {
-
-//         auto shard_data = read_file_segment(file, i * shard_size, shard_size);
-
-//         shard_data_list.push_back(shard_data);
-        
-//         unsigned char hash[SHA256_DIGEST_LENGTH];
-//         SHA256(reinterpret_cast<const unsigned char*>(shard_data.data()), 
-//               shard_data.size(), hash);
-        
-//         leaf_hashes.emplace_back(hash, hash + SHA256_DIGEST_LENGTH);
-//     }
-
-//     if (leaf_hashes.empty()) {
-//         // 处理空文件情况
-//         unsigned char hash[SHA256_DIGEST_LENGTH];
-//         SHA256(reinterpret_cast<const unsigned char*>(""), 0, hash);
-//         leaf_hashes.emplace_back(hash, hash + SHA256_DIGEST_LENGTH);
-//         shard_data_list.emplace_back(); // 空数据
-//     }
-
-//     // 3. 创建element_t*列表（请求的分片数据）
-//     std::vector<element_t*> requested_elements;
-//     for (auto num : indices) {
-//         element_t* elem = (element_t*)malloc(sizeof(element_t));
-//         element_init_G1(*elem, PAIRING);
-//         element_from_hash(*elem, shard_data_list[num].data(), shard_data_list[num].size());
-
-//         // element_printf("calculate_merkle_proof H_mi in mid: %B\n", *elem);
-
-//         requested_elements.push_back(elem);
-//     }
-
-//     // 4. 为每个请求的分片构建Merkle证明路径
-//     std::vector<std::vector<std::vector<char>>> all_proofs;
-    
-//     for (auto num : indices) {
-//         std::vector<std::vector<char>> proof_path;
-        
-//         // 将请求的块的哈希值作为证明路径的第一个元素
-//         proof_path.push_back(leaf_hashes[num]);
-        
-//         size_t current_index = num;
-//         std::vector<std::vector<char>> current_level = leaf_hashes;
-        
-//         while (current_level.size() > 1) {
-//             // 确定兄弟节点的位置
-//             size_t sibling_index;
-//             if (current_index % 2 == 0) {
-//                 // 当前节点是左节点，取右兄弟
-//                 sibling_index = current_index + 1;
-//             } else {
-//                 // 当前节点是右节点，取左兄弟
-//                 sibling_index = current_index - 1;
-//             }
-            
-//             // 确保兄弟索引不越界
-//             if (sibling_index < current_level.size()) {
-//                 proof_path.push_back(current_level[sibling_index]);
-//             } else {
-//                 // 如果没有兄弟节点（奇数个节点的情况），复制自己
-//                 proof_path.push_back(current_level[current_index]);
-//             }
-            
-//             // 构建下一层
-//             std::vector<std::vector<char>> next_level;
-//             for (size_t i = 0; i < current_level.size(); i += 2) {
-//                 std::vector<char> combined_hash;
-                
-//                 if (i + 1 < current_level.size()) {
-//                     combined_hash.insert(combined_hash.end(), 
-//                                         current_level[i].begin(), 
-//                                         current_level[i].end());
-//                     combined_hash.insert(combined_hash.end(), 
-//                                         current_level[i+1].begin(), 
-//                                         current_level[i+1].end());
-//                 } else {
-//                     // 奇数个节点，复制最后一个
-//                     combined_hash.insert(combined_hash.end(), 
-//                                         current_level[i].begin(), 
-//                                         current_level[i].end());
-//                     combined_hash.insert(combined_hash.end(), 
-//                                         current_level[i].begin(), 
-//                                         current_level[i].end());
-//                 }
-                
-//                 unsigned char hash[SHA256_DIGEST_LENGTH];
-//                 SHA256(reinterpret_cast<const unsigned char*>(combined_hash.data()),
-//                       combined_hash.size(), hash);
-//                 next_level.emplace_back(hash, hash + SHA256_DIGEST_LENGTH);
-//             }
-            
-//             // 更新当前索引为父节点在下一层的位置
-//             current_index = current_index / 2;
-//             current_level = next_level;
-//         }
-        
-//         all_proofs.push_back(proof_path);
-//     }
-
-//     // 恢复文件指针
-//     file.seekg(std::ios::beg);
-
-//     auto result = MerkleProof(requested_elements, all_proofs);
-
-//     element_printf("padd01的merkle_proof： %B\n", requested_elements[0]);
-
-//     return MerkleProof(std::move(requested_elements), std::move(all_proofs));
-// }
-
-void free_merkle_proof(std::pair<std::vector<element_t*>, std::vector<std::vector<std::vector<char>>>>& merkle_proof) {
-    // Free all element_t* in the first vector
-    for (element_t* elem : merkle_proof.first) {
-        if (elem != nullptr) {
-            element_clear(*elem);
-            free(elem);
-        }
-    }
-    
-    // The second part (vector<vector<vector<char>>>) doesn't need manual freeing
-    // as it uses RAII and will be automatically cleaned up when it goes out of scope
-    
-    // Clear the vectors to ensure they're empty
-    merkle_proof.first.clear();
-    merkle_proof.second.clear();
-}
-
-std::pair<bool, std::vector<char>> 
-verify_merkle_proof(const std::vector<std::vector<std::vector<char>>>& proofs,
-                   const std::vector<size_t>& indices) {
-    // 验证输入参数的有效性
-    if (proofs.empty() || indices.empty()) {
-        return {false, {}};
-    }
-    if (proofs.size() != indices.size()) {
-        return {false, {}};
-    }
-
-    // 用于存储计算得到的根哈希
-    std::vector<char> computed_root;
-
-    // 为每个分片验证其证明路径
-    for (size_t i = 0; i < proofs.size(); ++i) {
-        const auto& proof_path = proofs[i];
-        if (proof_path.empty()) {
-            return {false, {}};
-        }
-
-        // 第一个元素是分片的哈希值
-        const auto& shard_hash = proof_path[0];
-        size_t index = indices[i];
-
-        std::vector<char> current_hash = shard_hash;
-        size_t current_index = index;
-
-        // 沿着证明路径向上计算（跳过第一个元素，因为它是分片哈希本身）
-        for (size_t j = 1; j < proof_path.size(); ++j) {
-            const auto& sibling_hash = proof_path[j];
-            std::vector<char> combined_hash;
-            unsigned char hash[SHA256_DIGEST_LENGTH];
-
-            if (current_index % 2 == 0) {
-                // 当前节点是左节点，兄弟是右节点
-                combined_hash.insert(combined_hash.end(), 
-                                    current_hash.begin(), 
-                                    current_hash.end());
-                combined_hash.insert(combined_hash.end(), 
-                                    sibling_hash.begin(), 
-                                    sibling_hash.end());
-            } else {
-                // 当前节点是右节点，兄弟是左节点
-                combined_hash.insert(combined_hash.end(), 
-                                    sibling_hash.begin(), 
-                                    sibling_hash.end());
-                combined_hash.insert(combined_hash.end(), 
-                                    current_hash.begin(), 
-                                    current_hash.end());
-            }
-
-            // 计算父节点哈希
-            SHA256(reinterpret_cast<const unsigned char*>(combined_hash.data()),
-                  combined_hash.size(), hash);
-
-            current_hash.assign(hash, hash + SHA256_DIGEST_LENGTH);
-            current_index = current_index / 2;
-        }
-
-        // 如果是第一个分片，保存计算得到的根哈希
-        if (i == 0) {
-            computed_root = current_hash;
-        }
-        // 检查后续分片计算得到的根哈希是否一致
-        else if (current_hash != computed_root) {
-            return {false, {}};
-        }
-    }
-
-    return {true, computed_root};
-}
-
-// std::pair<bool, std::vector<char>> 
-// verify_merkle_proof(const MerkleProof& proof,
-//                    const std::vector<size_t>& indices) {
-//     // 验证输入参数的有效性
-//     const auto& proofs = proof.all_proofs;
-//     if (proofs.empty() || indices.empty()) {
-//         return {false, {}};
-//     }
-//     if (proofs.size() != indices.size()) {
-//         return {false, {}};
-//     }
-
-//     // 用于存储计算得到的根哈希
-//     std::vector<char> computed_root;
-
-//     // 为每个分片验证其证明路径
-//     for (size_t i = 0; i < proofs.size(); ++i) {
-//         const auto& proof_path = proofs[i];
-//         if (proof_path.empty()) {
-//             return {false, {}};
-//         }
-
-//         // 第一个元素是分片的哈希值
-//         const auto& shard_hash = proof_path[0];
-//         size_t index = indices[i];
-
-//         std::vector<char> current_hash = shard_hash;
-//         size_t current_index = index;
-
-//         // 沿着证明路径向上计算（跳过第一个元素，因为它是分片哈希本身）
-//         for (size_t j = 1; j < proof_path.size(); ++j) {
-//             const auto& sibling_hash = proof_path[j];
-//             std::vector<char> combined_hash;
-//             unsigned char hash[SHA256_DIGEST_LENGTH];
-
-//             if (current_index % 2 == 0) {
-//                 // 当前节点是左节点，兄弟是右节点
-//                 combined_hash.insert(combined_hash.end(), 
-//                                     current_hash.begin(), 
-//                                     current_hash.end());
-//                 combined_hash.insert(combined_hash.end(), 
-//                                     sibling_hash.begin(), 
-//                                     sibling_hash.end());
-//             } else {
-//                 // 当前节点是右节点，兄弟是左节点
-//                 combined_hash.insert(combined_hash.end(), 
-//                                     sibling_hash.begin(), 
-//                                     sibling_hash.end());
-//                 combined_hash.insert(combined_hash.end(), 
-//                                     current_hash.begin(), 
-//                                     current_hash.end());
-//             }
-
-//             // 计算父节点哈希
-//             SHA256(reinterpret_cast<const unsigned char*>(combined_hash.data()),
-//                   combined_hash.size(), hash);
-
-//             current_hash.assign(hash, hash + SHA256_DIGEST_LENGTH);
-//             current_index = current_index / 2;
-//         }
-
-//         // 如果是第一个分片，保存计算得到的根哈希
-//         if (i == 0) {
-//             computed_root = current_hash;
-//         }
-//         // 检查后续分片计算得到的根哈希是否一致
-//         else if (current_hash != computed_root) {
-//             return {false, {}};
-//         }
-//     }
-
-//     return {true, computed_root};
-// }
-
-// element_t* sig_init() {
-//     element_t* sig = (element_t*)malloc(sizeof(element_t));
-//     element_init_G1(*sig, PAIRING);
-//     return sig;
-// } 
 
 void sign_message(element_t sk, std::string message, element_t sig) {
     element_t h;
@@ -496,6 +403,7 @@ void sign_message(element_t sk, std::string message, element_t sig) {
     element_pow_zn(sig, h, sk);
     element_clear(h);
 }
+
 unsigned long vector_to_ulong(
     const std::vector<char>& data,
     char fill_byte,
@@ -565,86 +473,6 @@ void compress_element(unsigned char **data, int *n, element_t sig, pairing_t PAI
 
 void decompress_element(element_t sig, unsigned char *data, int n) {
     element_from_bytes_compressed(sig, data);
-}
-
-std::vector<char> calculate_merkle_root(std::fstream& file, size_t shard_size = DEFAULT_SHARD_SIZE) {
-    if (!file.is_open()) {
-        throw std::runtime_error("File is not open");
-    }
-    if (shard_size <= 0) {
-        throw std::runtime_error("Shard size must be greater than 0");
-    }
-
-    // // 1. 获取文件大小和分片数量
-    auto original_pos = file.tellg();
-    auto[file_size, num_shards] = get_file_size_and_shard_count(file, shard_size);
-
-    // 2. 计算每个分片的哈希
-    std::vector<std::vector<char>> leaf_hashes;
-
-
-    for (size_t i = 0; i < num_shards; ++i) {
-        
-        // 使用现有的 readFileSegment 函数读取分片
-        auto shard_data = read_file_segment(file, i * shard_size, shard_size);
-        
-        // 计算 SHA256 哈希
-        unsigned char hash[SHA256_DIGEST_LENGTH];
-        SHA256(reinterpret_cast<const unsigned char*>(shard_data.data()), 
-              shard_data.size(), hash);
-        
-        // 存储二进制哈希结果
-        leaf_hashes.emplace_back(hash, hash + SHA256_DIGEST_LENGTH);
-    }
-
-    if (leaf_hashes.empty()) {
-        // 处理空文件情况
-        unsigned char hash[SHA256_DIGEST_LENGTH];
-        SHA256(reinterpret_cast<const unsigned char*>(""), 0, hash);
-        return std::vector<char>(hash, hash + SHA256_DIGEST_LENGTH);
-    }
-
-    // 3. 构建 Merkle 树
-    std::vector<std::vector<char>> current_level = leaf_hashes;
-    while (current_level.size() > 1) {
-        std::vector<std::vector<char>> next_level;
-
-        for (size_t i = 0; i < current_level.size(); i += 2) {
-            // 组合两个哈希
-            std::vector<char> combined_hash;
-            
-            if (i + 1 < current_level.size()) {
-                combined_hash.insert(combined_hash.end(), 
-                                    current_level[i].begin(), 
-                                    current_level[i].end());
-                combined_hash.insert(combined_hash.end(), 
-                                    current_level[i + 1].begin(), 
-                                    current_level[i + 1].end());
-            } else {
-                // 奇数个哈希时，复制最后一个
-                combined_hash.insert(combined_hash.end(), 
-                                    current_level[i].begin(), 
-                                    current_level[i].end());
-                combined_hash.insert(combined_hash.end(), 
-                                    current_level[i].begin(), 
-                                    current_level[i].end());
-            }
-
-            // 计算组合哈希的 SHA256
-            unsigned char hash[SHA256_DIGEST_LENGTH];
-            SHA256(reinterpret_cast<const unsigned char*>(combined_hash.data()),
-                  combined_hash.size(), hash);
-            
-            next_level.emplace_back(hash, hash + SHA256_DIGEST_LENGTH);
-        }
-
-        current_level = next_level;
-    }
-
-    // 恢复文件指针
-    file.seekg(original_pos);
-
-    return current_level[0];
 }
 
 std::vector<char> read_file_segment(std::fstream& file, size_t start, size_t num) {

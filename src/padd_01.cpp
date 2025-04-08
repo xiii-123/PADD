@@ -31,26 +31,30 @@ pairing_t PAIRING;
 namespace fs = std::filesystem;
 
 Proof::Proof(element_t* mu, element_t* sigma, 
-    std::pair<std::vector<element_t*>, std::vector<std::vector<std::vector<char>>>> &merkle_proofs, 
-    element_t* sig_mht, std::vector<size_t> indices)
-{
+    std::unordered_map<size_t, std::vector<std::pair<std::string, bool>>> &merkle_proofs, 
+    std::vector<element_t*>& required_elements,
+    std::string root_hash,
+    element_t* sig_mht, std::vector<size_t>& indices)
+    {
+
     element_init_same_as(this->mu, *mu);
     element_set(this->mu, *mu);
     element_init_same_as(this->sigma, *sigma);
     element_set(this->sigma, *sigma);
-    // this->merkle_proofs = merkle_proofs;
+    this->root_hash = root_hash;
 
-    const auto& [req_elems, proofs] = merkle_proofs;
+    // 深拷贝merkle_proofs
+    for (const auto& [key, value] : merkle_proofs) {
+        this->merkle_proofs[key] = value;  // std::string and vector will be properly copied
+    }
 
-    this->merkle_proofs.second = proofs;
-
-    for (element_t* elem : req_elems) {
+    for (element_t* elem : required_elements) {
         element_t* new_elem = (element_t*)malloc(sizeof(element_t));
         if (!new_elem) throw std::bad_alloc();
         
         element_init_same_as(*new_elem, *elem);
         element_set(*new_elem, *elem);
-        this->merkle_proofs.first.push_back(new_elem);
+        this->required_elements.push_back(new_elem);
     }
 
     element_init_same_as(this->sig_mht, *sig_mht);
@@ -66,33 +70,22 @@ Proof::~Proof() {
         element_clear(mu);
     }
 
-
     // Clean up sigma
     if (sigma != NULL) {
         element_clear(sigma);
     }
-
 
     // Clean up sig_mht
     if (sig_mht != NULL) {
         element_clear(sig_mht);
     }
 
-    // Clean up shard_proofs.first (vector of element_t*)
-    for (element_t* elem : merkle_proofs.first) {
+    for (element_t* elem : required_elements) {
         if (elem != NULL) {
             element_clear(*elem);
             free(elem);
         }
     }
-    merkle_proofs.first.clear();
-
-    // shard_proofs.second is vector<vector<vector<char>>> which doesn't need manual cleanup
-    merkle_proofs.second.clear();
-
-    // indices is vector<size_t> which doesn't need manual cleanup
-    indices.clear();
-
 }
 
 void padd_init(element_t pk, element_t sk, element_t g) {
@@ -175,7 +168,7 @@ std::string construct_t(bls_pkc& pkc, const std::string& file_name, size_t n,  e
     return t;
 }
 
-void calculate_sigma(std::fstream& f, size_t start, size_t num, bls_pkc& pkc, element_t u, element_t sigma){
+void calculate_single_sigma(std::fstream& f, size_t start, size_t num, bls_pkc& pkc, element_t u, element_t sigma){
     // 读取文件分片
     std::vector<char> buffer = read_file_segment(f, start, num);
 
@@ -200,7 +193,7 @@ void calculate_sigma(std::fstream& f, size_t start, size_t num, bls_pkc& pkc, el
     element_clear(temp);
 }
 
-std::shared_ptr<std::vector<element_t *>> calculate_phi(std::fstream& f, bls_pkc& pkc, element_t u, size_t shard_size = DEFAULT_SHARD_SIZE) {
+std::vector<element_t *> calculate_phi(std::fstream& f, bls_pkc& pkc, element_t u, size_t shard_size = DEFAULT_SHARD_SIZE) {
     if (!f.is_open()) {
         throw std::runtime_error("File is not open");
     }
@@ -209,13 +202,11 @@ std::shared_ptr<std::vector<element_t *>> calculate_phi(std::fstream& f, bls_pkc
     }
 
     auto original_pos = f.tellg();
-    f.seekg(0, std::ios::end);
-    size_t file_size = f.tellg();
-    f.seekg(0, std::ios::beg);
+    auto[file_size, num_shard] = get_file_size_and_shard_count(f, shard_size);
 
     size_t num_shards = (file_size + shard_size - 1) / shard_size;
 
-    auto phi = std::make_shared<std::vector<element_t*>>();
+    std::vector<element_t*> phi;
 
     try {
         for (size_t i = 0; i < num_shards; ++i) {
@@ -224,12 +215,12 @@ std::shared_ptr<std::vector<element_t *>> calculate_phi(std::fstream& f, bls_pkc
 
             element_t *sigma = (element_t*)malloc(sizeof(element_t));
             element_init_G1(*sigma, PAIRING);
-            calculate_sigma(f, start, read_size, pkc, u, *sigma);
+            calculate_single_sigma(f, start, read_size, pkc, u, *sigma);
 
-            phi->push_back(sigma);
+            phi.push_back(sigma);
         }
     } catch (...) {
-        for (auto elem : *phi) {
+        for (auto elem : phi) {
             element_clear(*elem);
         }
         f.seekg(original_pos);
@@ -240,21 +231,21 @@ std::shared_ptr<std::vector<element_t *>> calculate_phi(std::fstream& f, bls_pkc
     return phi;
 }
 
-std::vector<char> serialize_phi(std::shared_ptr<std::vector<element_t*>> phi) {
-    if (!phi) {
+std::vector<char> serialize_phi(std::vector<element_t *> phi) {
+    if (phi.empty()) {
         throw std::runtime_error("Null phi pointer");
     }
 
     std::vector<char> serialized_data;
     
     // 首先写入签名数量
-    uint32_t num_sigs = phi->size();
+    uint32_t num_sigs = phi.size();
     char num_buf[sizeof(uint32_t)];
     memcpy(num_buf, &num_sigs, sizeof(uint32_t));
     serialized_data.insert(serialized_data.end(), num_buf, num_buf + sizeof(uint32_t));
 
     // 序列化每个 G2 元素
-    for (const auto& sig : *phi) {
+    for (const auto& sig : phi) {
         if (!sig) {
             throw std::runtime_error("Null element in phi");
         }
@@ -284,7 +275,7 @@ std::vector<char> serialize_phi(std::shared_ptr<std::vector<element_t*>> phi) {
     return serialized_data;
 }
 
-std::shared_ptr<std::vector<element_t*>> deserialize_phi(const std::vector<char>& serialized_data, pairing_t pairing) {
+std::vector<element_t *> deserialize_phi(const std::vector<char>& serialized_data, pairing_t pairing) {
     if (serialized_data.size() < sizeof(uint32_t)) {
         throw std::runtime_error("Invalid serialized data");
     }
@@ -293,7 +284,8 @@ std::shared_ptr<std::vector<element_t*>> deserialize_phi(const std::vector<char>
     uint32_t num_sigs;
     memcpy(&num_sigs, serialized_data.data(), sizeof(uint32_t));
 
-    auto phi = std::make_shared<std::vector<element_t*>>();
+    std::vector<element_t*> phi;
+
     size_t offset = sizeof(uint32_t);
 
     try {
@@ -317,12 +309,12 @@ std::shared_ptr<std::vector<element_t*>> deserialize_phi(const std::vector<char>
                 throw std::runtime_error("Failed to deserialize G2 element");
             }
 
-            phi->push_back(sig);
+            phi.push_back(sig);
             offset += buf_len;
         }
     } catch (...) {
         // 发生错误时清理已分配的元素
-        for (auto elem : *phi) {
+        for (auto elem : phi) {
             element_clear(*elem);
             free(elem);
         }
@@ -332,23 +324,20 @@ std::shared_ptr<std::vector<element_t*>> deserialize_phi(const std::vector<char>
     return phi;
 }
 
-void free_phi(std::shared_ptr<std::vector<element_t*>>& phi) {
-    if (!phi) return;  // Early return if null
+void free_phi(std::vector<element_t *>& phi) {
+    if (phi.empty()) return;  // Early return if null
     
-    for (element_t* elem : *phi) {
+    for (element_t* elem : phi) {
         if (elem != nullptr) {
             element_clear(*elem);  // Clear the PBC element
             free(elem);            // Free the allocated memory
         }
     }
-    phi->clear();  // Clear the vector
-    
-    // Reset the shared_ptr (not strictly necessary as it will decrement refcount)
-    phi.reset();
+    phi.clear();  // Clear the vector
 }
 
-std::pair<std::pair<std::string, element_t*>, std::shared_ptr<std::vector<element_t*>>> 
-sig_gen(bls_pkc& pkc, std::string file_name, std::fstream& f, size_t shard_size = DEFAULT_SHARD_SIZE) {
+std::pair<std::pair<std::string, element_t*>, std::vector<element_t *>> 
+sig_gen(bls_pkc& pkc, std::string file_name, std::fstream& f, MerkleTree& tree, size_t shard_size = DEFAULT_SHARD_SIZE) {
     auto[file_size, shard_num] = get_file_size_and_shard_count(f, shard_size);
     element_t u;
     element_init_G1(u, PAIRING);
@@ -357,7 +346,8 @@ sig_gen(bls_pkc& pkc, std::string file_name, std::fstream& f, size_t shard_size 
     std::string t = construct_t(pkc, get_fileName_from_path(file_name), shard_num, u);
     auto phi = calculate_phi(f, pkc, u, shard_size);
 
-    std::vector<char> root = calculate_merkle_root(f, shard_size);
+    // std::vector<char> root = calculate_merkle_root(f, shard_size);
+    auto root = tree.get_root_hash();
     element_t *sig = (element_t*)malloc(sizeof(element_t));
     element_init_G1(*sig, PAIRING);
     element_from_hash(*sig, root.data(), root.size());
@@ -542,8 +532,6 @@ element_t* calculate_proof_mu(
     element_t *mu = (element_t*)malloc(sizeof(element_t));
     element_init_Zr(*mu, PAIRING);
     element_set0(*mu);
-    int start=0;
-    int num = 0;
 
     auto[file_size, shard_num] = get_file_size_and_shard_count(f, shard_size);
 
@@ -556,9 +544,7 @@ element_t* calculate_proof_mu(
         for (const auto& [s_i, v_i] : chal) {
             // 1. 读取文件块 (自动处理锁和边界检查)
 
-            num = file_size - num < start ? num : file_size - start;
-
-            auto buffer = read_file_segment(f, start, num);
+            auto buffer = read_file_segment(f, s_i *shard_size, shard_size);
 
             // 2. 将mi转化为zr元素
             element_set_si(m_i, vector_to_ulong(buffer));
@@ -601,8 +587,8 @@ element_t* calculate_proof_sigma_from_file(std::vector<std::pair<size_t, element
 
     try {
     for (const auto& [s_i, v_i] : chal) {
-        // 1. 计算单个σ_i (使用已有calculate_sigma函数)
-        calculate_sigma(f, s_i * shard_size, shard_size, pkc, u, sigma_i);
+        // 1. 计算单个σ_i (使用已有calculate_single_sigma函数)
+        calculate_single_sigma(f, s_i * shard_size, shard_size, pkc, u, sigma_i);
 
         // 2. 计算σ_i^{v_i}
         element_pow_zn(temp, sigma_i, *v_i); // temp = σ_i^{v_i}
@@ -625,12 +611,10 @@ element_t* calculate_proof_sigma_from_file(std::vector<std::pair<size_t, element
     return sigma;
 }
 
-element_t* calculate_proof_sigma(
-    const std::vector<std::pair<size_t, element_t*>>& chal,
-    const std::shared_ptr<std::vector<element_t*>>& phi) {
+element_t* calculate_proof_sigma(const std::vector<std::pair<size_t, element_t*>>& chal,const std::vector<element_t *>& phi) {
     
     // 验证输入
-    if (!phi) {
+    if (phi.empty()) {
         throw std::runtime_error("phi is null");
     }
     if (chal.empty()) {
@@ -651,14 +635,15 @@ element_t* calculate_proof_sigma(
 
     try {
         for (const auto& [s_i, v_i] : chal) {
+ 
             // 检查索引是否有效
-            if (s_i >= phi->size()) {
+            if (s_i >= phi.size()) {
                 throw std::runtime_error("Invalid shard index in challenge");
             }
 
             // 获取预先计算的sigma_i
     
-            element_t* sigma_i = phi->at(s_i);
+            element_t* sigma_i = phi.at(s_i);
 
             // 计算σ_i^{v_i}
             element_pow_zn(temp, *sigma_i, *v_i); // temp = σ_i^{v_i}
@@ -677,7 +662,6 @@ element_t* calculate_proof_sigma(
     return sigma;
 }
 
-
 std::vector<size_t> extract_first(const std::vector<std::pair<size_t, element_t*>>& chal) {
     std::vector<size_t> result;
     result.reserve(chal.size()); // 预分配空间以提高效率
@@ -686,20 +670,86 @@ std::vector<size_t> extract_first(const std::vector<std::pair<size_t, element_t*
     return result;
 }
 
+std::vector<element_t*> get_requeired_elements(std::fstream& file, std::vector<size_t> indices, size_t shard_size){
+    if (!file.is_open()) {
+        throw std::runtime_error("File is not open");
+    }
+    if (shard_size <= 0) {
+        throw std::runtime_error("Shard size must be greater than 0");
+    }
+    if (indices.empty()) {
+        throw std::runtime_error("Proof indices cannot be empty");
+    }
+
+    file.seekg(std::ios::beg);
+
+
+    // 1. 获取文件大小并计算分片数量
+    auto[file_size, num_shards] = get_file_size_and_shard_count(file, shard_size);
+
+    // 验证nums中的索引是否有效
+    for (auto num : indices) {
+        if (num >= num_shards) {
+            // file.seekg(original_pos);
+            throw std::runtime_error("Shard index out of range");
+        }
+    }
+
+    // 2. 计算所有叶节点的哈希并存储分片数据
+    std::vector<std::vector<char>> leaf_hashes;
+    std::vector<std::vector<char>> shard_data_list;
+    for (size_t i = 0; i < num_shards; ++i) {
+
+        auto shard_data = read_file_segment(file, i * shard_size, shard_size);
+
+        shard_data_list.push_back(shard_data);
+        
+        unsigned char hash[SHA256_DIGEST_LENGTH];
+        SHA256(reinterpret_cast<const unsigned char*>(shard_data.data()), 
+              shard_data.size(), hash);
+        
+        leaf_hashes.emplace_back(hash, hash + SHA256_DIGEST_LENGTH);
+    }
+
+    if (leaf_hashes.empty()) {
+        // 处理空文件情况
+        unsigned char hash[SHA256_DIGEST_LENGTH];
+        SHA256(reinterpret_cast<const unsigned char*>(""), 0, hash);
+        leaf_hashes.emplace_back(hash, hash + SHA256_DIGEST_LENGTH);
+        shard_data_list.emplace_back(); // 空数据
+    }
+
+    // 3. 创建element_t*列表（请求的分片数据）
+    std::vector<element_t*> requested_elements;
+    for (auto num : indices) {
+        element_t* elem = (element_t*)malloc(sizeof(element_t));
+        element_init_G1(*elem, PAIRING);
+        element_from_hash(*elem, shard_data_list[num].data(), shard_data_list[num].size());
+
+        requested_elements.push_back(elem);
+    }
+    return requested_elements;
+}
+
 Proof gen_proof(std::fstream& f,
-    std::shared_ptr<std::vector<element_t *>> &&phi, 
+    std::vector<element_t *>& phi, 
     std::vector<std::pair<size_t, element_t*>>& chal, 
     element_t* sig_mht,
-    std::vector<size_t> indices,
+    MerkleTree& tree,
     size_t shard_size = DEFAULT_SHARD_SIZE
 ){
+
     element_t* mu = calculate_proof_mu(chal, f, shard_size);
     element_t* sigma = calculate_proof_sigma(chal, phi);
-    auto merkle_proof = calculate_merkle_proof(f, extract_first(chal), shard_size);
-    // element_printf("merkle_proof的merkle_proof： %B\n", merkle_proof.requested_elements[0]);
-    auto proof = Proof(mu, sigma, merkle_proof, sig_mht, indices);
-    // element_printf("gen_proof的merkle_proof： %B\n", proof.shard_proofs.requested_elements[0]);
-    return Proof(mu, sigma, merkle_proof, sig_mht, indices);
+    // auto merkle_proof = calculate_merkle_proof(f, extract_first(chal), shard_size);
+    auto merkle_proofs = tree.batch_get_proofs(extract_first(chal));
+
+    auto required_elements = get_requeired_elements(f, extract_first(chal), shard_size);
+
+
+    // return Proof(mu, sigma, merkle_proof, sig_mht, extract_first(chal));
+    auto indices = extract_first(chal);
+    return Proof(mu, sigma, merkle_proofs, required_elements, tree.get_root_hash(), sig_mht, indices);
 }
 
 bool authentication(Proof &proof, bls_pkc& pkc){
@@ -713,11 +763,12 @@ bool authentication(Proof &proof, bls_pkc& pkc){
     element_init_GT(temp1, PAIRING);
     element_init_GT(temp2, PAIRING);
 
-    auto[flag, hash_mht_vector] = verify_merkle_proof(proof.merkle_proofs.second, proof.indices);
+    // auto[flag, hash_mht_vector] = verify_merkle_proof(proof.merkle_proofs.second, proof.indices);
+    bool flag = MerkleTree::batch_verify_proofs(proof.merkle_proofs, proof.root_hash);
 
 
     if (!flag) return false;
-    element_from_hash(hash_mht, hash_mht_vector.data(), hash_mht_vector.size());
+    element_from_hash(hash_mht, proof.root_hash.data(), proof.root_hash.size());
 
     element_pairing(temp1, proof.sig_mht, pkc.g);
     element_pairing(temp2, hash_mht, g_alpha);
@@ -731,9 +782,7 @@ bool authentication(Proof &proof, bls_pkc& pkc){
     return result;
 }
 
-element_t* calculate_product_proof(
-    const std::vector<element_t*>& m_hashes,  // H(m_i) 的向量
-    const std::vector<std::pair<size_t, element_t*>>& chal) {  // 挑战对 (s_i, ν_i)
+element_t* calculate_product_proof(const std::vector<element_t*>& m_hashes, const std::vector<std::pair<size_t, element_t*>>& chal) { 
 
     // 参数检查
     if (m_hashes.empty() || chal.empty()) {
@@ -743,7 +792,7 @@ element_t* calculate_product_proof(
         throw std::invalid_argument("m_hashes and chal sizes must match");
     }
 
-    // 初始化结果 (假设在G1群)
+    // 初始化结果
     element_t* result = (element_t*)malloc(sizeof(element_t));
     element_init_G1(*result, PAIRING);
     element_set1(*result);  // 初始化为乘法单位元
@@ -755,10 +804,10 @@ element_t* calculate_product_proof(
     try {
         for (size_t i = 0; i < chal.size(); ++i) {
             // 获取当前项的 ν_i
-            element_t* nu_i = chal[i].second;
+            element_t* v_i = chal[i].second;
 
             // 计算 H(m_i)^{ν_i}
-            element_pow_zn(temp, *m_hashes[i], *nu_i);
+            element_pow_zn(temp, *m_hashes[i], *v_i);
             // element_printf("H_mi last: %B\n", *m_hashes[i]);
             
             // 累乘到结果
@@ -779,11 +828,7 @@ element_t* calculate_product_proof(
     return result;
 }
 
-bool verify(bls_pkc& pkc, 
-    std::vector<std::pair<size_t, element_t*>>& chal, 
-    Proof &proof,
-    element_t u
-){  
+bool verify(bls_pkc& pkc, std::vector<std::pair<size_t, element_t*>>& chal, Proof &proof,element_t u){  
     // std::cout << "authentication: " << authentication(proof, pkc) << std::endl;
     // 1. merkle hash root 验证以及身份验证
     if (!authentication(proof, pkc)) return false;
@@ -792,15 +837,19 @@ bool verify(bls_pkc& pkc,
     // 2. 证明验证
     element_t temp1, temp2;
     element_t temp3;
+    element_t test_temp;
     
     element_init_GT(temp1, PAIRING);
     element_init_GT(temp2, PAIRING);
     element_init_G1(temp3, PAIRING);
+    element_init_G1(test_temp, PAIRING);
 
     element_pairing(temp1, proof.sigma, pkc.g);
-    auto temp4 = calculate_product_proof(proof.merkle_proofs.first, chal);
+    // auto temp4 = calculate_product_proof(proof.merkle_proofs.first, chal);
+    auto temp4 = calculate_product_proof(proof.required_elements, chal);
     element_pow_zn(temp3, u, proof.mu);
     element_mul(temp3, *temp4, temp3);
+    element_pow_zn(test_temp, temp3, pkc.sk->alpha);
 
     element_pairing(temp2, temp3, pkc.pk->v);
 
