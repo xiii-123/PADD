@@ -8,6 +8,8 @@
 
 extern pairing_t PAIRING;
 
+#define PKC_SIZE 424
+
 // BLS key structures
 typedef struct {
     element_t v;

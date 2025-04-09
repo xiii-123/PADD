@@ -16,6 +16,7 @@ add_executable(padd_01
     src/main.cpp
     src/padd_01.cpp
     src/utils.cpp
+    src/vrf.cpp
 )
 
 # 设置可执行文件的运行时路径

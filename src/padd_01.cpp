@@ -13,18 +13,6 @@
 #include <memory>
 #include <stdexcept>
 
-#define TYPEA_PARAMS                                           \
-    "type a\n"                                                 \
-    "q 87807107996633125224377819847540498158068831994142082"  \
-    "1102865339926647563088022295707862517942266222142315585"  \
-    "8769582317459277713367317481324925129998224791\n"         \
-    "h 12016012264891146079388821366740534204802954401251311"  \
-    "822919615131047207289359704531102844802183906537786776\n" \
-    "r 730750818665451621361119245571504901405976559617\n"     \
-    "exp2 159\n"                                               \
-    "exp1 107\n"                                               \
-    "sign1 1\n"                                                \
-    "sign0 1\n"
 
 pairing_t PAIRING;
 
@@ -89,7 +77,6 @@ Proof::~Proof() {
 }
 
 void padd_init(element_t pk, element_t sk, element_t g) {
-    pairing_init_set_buf(PAIRING, TYPEA_PARAMS, sizeof(TYPEA_PARAMS));
     element_init_G2(g, PAIRING);
     element_init_G2(pk, PAIRING);
     element_init_Zr(sk, PAIRING);
@@ -130,6 +117,87 @@ element_t* sig_init(){
     element_t* sig = (element_t*)malloc(sizeof(element_t));
     element_init_G1(*sig, PAIRING);
     return sig;
+}
+
+int bls_pkc_serialize(bls_pkc *pkc,  unsigned char *buf, size_t buf_len) {
+    if (!pkc || !buf || !PAIRING) return -1;
+    
+    size_t offset = 0;
+    size_t needed = 0;
+    
+    // 计算所需空间
+    needed += element_length_in_bytes(pkc->g);
+    needed += element_length_in_bytes(pkc->pk->v);
+    needed += element_length_in_bytes(pkc->pk->spk);
+    needed += element_length_in_bytes(pkc->sk->alpha);
+    needed += element_length_in_bytes(pkc->sk->ssk);
+    
+    if (buf_len < needed) return -1;
+    
+    // 序列化g
+    offset += element_to_bytes(buf + offset, pkc->g);
+    
+    // 序列化pk->v
+    offset += element_to_bytes(buf + offset, pkc->pk->v);
+    
+    // 序列化pk->spk
+    offset += element_to_bytes(buf + offset, pkc->pk->spk);
+    
+    // 序列化sk->alpha
+    offset += element_to_bytes(buf + offset, pkc->sk->alpha);
+    
+    // 序列化sk->ssk
+    offset += element_to_bytes(buf + offset, pkc->sk->ssk);
+    
+    return offset;
+}
+
+bls_pkc* bls_pkc_deserialize(unsigned char *buf, size_t buf_len){
+    if (!buf || !PAIRING) return NULL;
+    
+    bls_pkc *pkc = (bls_pkc*)malloc(sizeof(bls_pkc));
+    if (!pkc) return NULL;
+    
+    pkc->pk = (bls_pk*)malloc(sizeof(bls_pk));
+    pkc->sk = (bls_sk*)malloc(sizeof(bls_sk));
+    if (!pkc->pk || !pkc->sk) {
+        free(pkc->pk);
+        free(pkc->sk);
+        free(pkc);
+        return NULL;
+    }
+    
+    size_t offset = 0;
+    
+    // 初始化所有元素
+    element_init_G1(pkc->g, PAIRING);
+    element_init_G1(pkc->pk->v, PAIRING);
+    element_init_G2(pkc->pk->spk, PAIRING);
+    element_init_Zr(pkc->sk->alpha, PAIRING);
+    element_init_Zr(pkc->sk->ssk, PAIRING);
+    
+    // 反序列化g
+    offset += element_from_bytes(pkc->g, buf + offset);
+    
+    // 反序列化pk->v
+    offset += element_from_bytes(pkc->pk->v, buf + offset);
+    
+    // 反序列化pk->spk
+    offset += element_from_bytes(pkc->pk->spk, buf + offset);
+    
+    // 反序列化sk->alpha
+    offset += element_from_bytes(pkc->sk->alpha, buf + offset);
+    
+    // 反序列化sk->ssk
+    offset += element_from_bytes(pkc->sk->ssk, buf + offset);
+    
+    // 检查是否成功读取了所有数据
+    if (offset > buf_len) {
+        padd_clear(pkc);
+        return NULL;
+    }
+    
+    return pkc;
 }
 
 std::string construct_t(bls_pkc& pkc, const std::string& file_name, size_t n,  element_t u) {
