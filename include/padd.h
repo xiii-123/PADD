@@ -39,7 +39,10 @@ class Proof{
             std::string root_hash,
             element_t* sig_mht, std::vector<size_t>& indices);
         ~Proof();
+        std::vector<std::byte> Proof_serialize();
 };
+
+Proof Proof_deserialize(const std::vector<std::byte>& buf);
 
 element_t* sig_init();
 
@@ -63,11 +66,15 @@ void free_chal(std::vector<std::pair<size_t, element_t*>>& challenges);
 
 std::vector<char> serialize_chal(const std::vector<std::pair<size_t, element_t*>>& chal);
 
-void padd_clear(bls_pkc* pkc);
+void free_pkc(bls_pkc* pkc);
 
 void free_element_ptr(element_t* t);
 
 bls_pkc* key_gen();
+
+std::vector<std::byte> chal_serialize(const std::vector<std::pair<size_t, element_t*>>& challenges);
+
+std::vector<std::pair<size_t, element_t*>> chal_deserialize(const std::vector<std::byte>& buf);
 
 void padd_init(element_t pk, element_t sk, element_t g);
 
@@ -87,6 +94,6 @@ bool verify(bls_pkc& pkc,
     element_t u
 );
 
-int bls_pkc_serialize(bls_pkc *pkc,  unsigned char *buf, size_t buf_len);
+std::vector<std::byte> bls_pkc_serialize(bls_pkc* pkc);
 
-bls_pkc* bls_pkc_deserialize(unsigned char *buf,  size_t buf_len = PKC_SIZE);
+bls_pkc* bls_pkc_deserialize(const std::vector<std::byte>& buf);

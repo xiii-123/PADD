@@ -76,6 +76,246 @@ Proof::~Proof() {
     }
 }
 
+// Proof 类的序列化函数
+std::vector<std::byte> Proof::Proof_serialize() {
+    std::vector<std::byte> buf;
+
+    
+    try {
+        // 1. 序列化 mu 和 sigma
+        size_t mu_len = element_length_in_bytes(this->mu);
+        size_t sigma_len = element_length_in_bytes(this->sigma);
+        size_t sig_mht_len = element_length_in_bytes(this->sig_mht);
+        
+        // 2. 计算所需总空间
+        size_t total_size = 0;
+        total_size += mu_len;                     // mu
+        total_size += sigma_len;                  // sigma
+        total_size += sizeof(size_t);             // merkle_proofs 大小
+        for (const auto& [key, proofs] : this->merkle_proofs) {
+            total_size += sizeof(size_t);          // key
+            total_size += sizeof(size_t);         // proofs vector 大小
+            for (const auto& [hash, is_right] : proofs) {
+                total_size += sizeof(size_t);     // hash 长度
+                total_size += hash.size();         // hash 数据
+                total_size += sizeof(bool);        // is_right
+            }
+        }
+        total_size += sizeof(size_t);             // required_elements 数量
+        for (element_t* elem : this->required_elements) {
+            total_size += element_length_in_bytes(*elem);
+        }
+        total_size += sizeof(size_t);             // root_hash 长度
+        total_size += this->root_hash.size();     // root_hash 数据
+        total_size += sig_mht_len;                // sig_mht
+        total_size += sizeof(size_t);             // indices 数量
+        total_size += this->indices.size() * sizeof(size_t); // indices 数据
+        
+        // 3. 预分配空间
+        buf.resize(total_size);
+        size_t offset = 0;
+
+        // 4. 序列化 mu 和 sigma
+        offset += element_to_bytes(reinterpret_cast<unsigned char*>(buf.data() + offset), this->mu);
+        offset += element_to_bytes(reinterpret_cast<unsigned char*>(buf.data() + offset), this->sigma);
+        
+
+        // 5. 序列化 merkle_proofs
+        size_t merkle_proofs_size = this->merkle_proofs.size();
+        std::memcpy(buf.data() + offset, &merkle_proofs_size, sizeof(size_t));
+        offset += sizeof(size_t);
+        
+        for (const auto& [key, proofs] : this->merkle_proofs) {
+            std::memcpy(buf.data() + offset, &key, sizeof(size_t));
+            offset += sizeof(size_t);
+            
+            size_t proofs_size = proofs.size();
+            std::memcpy(buf.data() + offset, &proofs_size, sizeof(size_t));
+            offset += sizeof(size_t);
+            
+            for (const auto& [hash, is_right] : proofs) {
+                size_t hash_len = hash.size();
+                std::memcpy(buf.data() + offset, &hash_len, sizeof(size_t));
+                offset += sizeof(size_t);
+                
+                std::memcpy(buf.data() + offset, hash.data(), hash_len);
+                offset += hash_len;
+                
+                std::memcpy(buf.data() + offset, &is_right, sizeof(bool));
+                offset += sizeof(bool);
+            }
+        }
+        
+        // 6. 序列化 required_elements
+        size_t required_elements_size = this->required_elements.size();
+        std::memcpy(buf.data() + offset, &required_elements_size, sizeof(size_t));
+        offset += sizeof(size_t);
+        
+        for (element_t* elem : this->required_elements) {
+            offset += element_to_bytes(reinterpret_cast<unsigned char*>(buf.data() + offset), *elem);
+        }
+        
+        // 7. 序列化 root_hash
+        size_t root_hash_len = this->root_hash.size();
+        std::memcpy(buf.data() + offset, &root_hash_len, sizeof(size_t));
+        offset += sizeof(size_t);
+        
+        std::memcpy(buf.data() + offset, this->root_hash.data(), root_hash_len);
+        offset += root_hash_len;
+
+        
+        // 8. 序列化 sig_mht
+        offset += element_to_bytes(reinterpret_cast<unsigned char*>(buf.data() + offset), this->sig_mht);
+        
+        // 9. 序列化 indices
+        size_t indices_size = this->indices.size(); // Updated to use 'this->indices'
+        std::memcpy(buf.data() + offset, &indices_size, sizeof(size_t));
+        offset += sizeof(size_t);
+        
+        std::memcpy(buf.data() + offset, this->indices.data(), indices_size * sizeof(size_t));
+        offset += indices_size * sizeof(size_t);
+        
+    } catch (...) {
+        buf.clear();
+        throw;
+    }
+    
+    return buf;
+}
+
+// Proof 类的反序列化函数
+Proof Proof_deserialize(const std::vector<std::byte>& buf) {
+    if (buf.empty()) {
+        throw std::runtime_error("Empty buffer for deserialization");
+    }
+    
+    Proof proof;
+    size_t offset = 0;
+    const size_t buf_size = buf.size();
+    
+    try {
+        // 1. 反序列化 mu 和 sigma
+        element_init_Zr(proof.mu, PAIRING);
+        size_t mu_len = element_from_bytes(proof.mu, (unsigned char*)reinterpret_cast<const unsigned char*>(buf.data() + offset));
+        if (mu_len == 0) throw std::runtime_error("Failed to deserialize mu");
+        offset += mu_len;
+        
+        element_init_G1(proof.sigma, PAIRING);
+        size_t sigma_len = element_from_bytes(proof.sigma, (unsigned char*)reinterpret_cast<const unsigned char*>(buf.data() + offset));
+        if (sigma_len == 0) throw std::runtime_error("Failed to deserialize sigma");
+        offset += sigma_len;
+
+        
+        // 2. 反序列化 merkle_proofs
+        size_t merkle_proofs_size;
+        if (offset + sizeof(size_t) > buf_size) throw std::runtime_error("Invalid buffer: merkle_proofs size");
+        std::memcpy(&merkle_proofs_size, buf.data() + offset, sizeof(size_t));
+        offset += sizeof(size_t);
+        
+        for (size_t i = 0; i < merkle_proofs_size; ++i) {
+            if (offset + sizeof(size_t) > buf_size) throw std::runtime_error("Invalid buffer: merkle_proofs key");
+            size_t key;
+            std::memcpy(&key, buf.data() + offset, sizeof(size_t));
+            offset += sizeof(size_t);
+            
+            size_t proofs_size;
+            if (offset + sizeof(size_t) > buf_size) throw std::runtime_error("Invalid buffer: proofs size");
+            std::memcpy(&proofs_size, buf.data() + offset, sizeof(size_t));
+            offset += sizeof(size_t);
+            
+            std::vector<std::pair<std::string, bool>> proofs;
+            for (size_t j = 0; j < proofs_size; ++j) {
+                size_t hash_len;
+                if (offset + sizeof(size_t) > buf_size) throw std::runtime_error("Invalid buffer: hash length");
+                std::memcpy(&hash_len, buf.data() + offset, sizeof(size_t));
+                offset += sizeof(size_t);
+                
+                if (offset + hash_len > buf_size) throw std::runtime_error("Invalid buffer: hash data");
+                std::string hash(reinterpret_cast<const char*>(buf.data() + offset), hash_len);
+                offset += hash_len;
+                
+                bool is_right;
+                if (offset + sizeof(bool) > buf_size) throw std::runtime_error("Invalid buffer: is_right");
+                std::memcpy(&is_right, buf.data() + offset, sizeof(bool));
+                offset += sizeof(bool);
+                
+                proofs.emplace_back(hash, is_right);
+            }
+            
+            proof.merkle_proofs[key] = std::move(proofs);
+        }
+        
+        // 3. 反序列化 required_elements
+        size_t required_elements_size;
+        if (offset + sizeof(size_t) > buf_size) throw std::runtime_error("Invalid buffer: required_elements size");
+        std::memcpy(&required_elements_size, buf.data() + offset, sizeof(size_t));
+
+        offset += sizeof(size_t);
+        
+        for (size_t i = 0; i < required_elements_size; ++i) {
+            element_t* elem = (element_t*)malloc(sizeof(element_t));
+            if (!elem) throw std::bad_alloc();
+            
+            element_init_G1(*elem, PAIRING);
+            size_t elem_len = element_from_bytes(*elem, (unsigned char*)reinterpret_cast<const unsigned char*>(buf.data() + offset));
+            if (elem_len == 0) {
+                element_clear(*elem);
+                free(elem);
+                throw std::runtime_error("Failed to deserialize required element");
+            }
+            offset += elem_len;
+            
+            proof.required_elements.push_back(elem);
+        }
+        
+        // 4. 反序列化 root_hash
+        size_t root_hash_len;
+        if (offset + sizeof(size_t) > buf_size) throw std::runtime_error("Invalid buffer: root_hash length");
+        std::memcpy(&root_hash_len, buf.data() + offset, sizeof(size_t));
+        // root_hash_len = 64;
+
+        offset += sizeof(size_t);
+        
+
+        if (offset + root_hash_len > buf_size) throw std::runtime_error("Invalid buffer: root_hash data");
+        proof.root_hash.assign(reinterpret_cast<const char*>(buf.data() + offset), root_hash_len);
+
+        offset += root_hash_len;
+
+        
+        // 5. 反序列化 sig_mht
+        element_init_G1(proof.sig_mht, PAIRING);
+        size_t sig_mht_len = element_from_bytes(proof.sig_mht,(unsigned char*)reinterpret_cast<const unsigned char*>(buf.data() + offset));
+        if (sig_mht_len == 0) throw std::runtime_error("Failed to deserialize sig_mht");
+        offset += sig_mht_len;
+        
+        // 6. 反序列化 indices
+        size_t indices_size;
+        if (offset + sizeof(size_t) > buf_size) throw std::runtime_error("Invalid buffer: indices size");
+        std::memcpy(&indices_size, buf.data() + offset, sizeof(size_t));
+        offset += sizeof(size_t);
+        
+        if (offset + indices_size * sizeof(size_t) > buf_size) throw std::runtime_error("Invalid buffer: indices data");
+        proof.indices.resize(indices_size);
+        std::memcpy(proof.indices.data(), buf.data() + offset, indices_size * sizeof(size_t));
+        offset += indices_size * sizeof(size_t);
+
+        
+    } catch (...) {
+        // 清理已分配的资源
+        element_clear(proof.mu);
+        element_clear(proof.sigma);
+        element_clear(proof.sig_mht);
+        for (element_t* elem : proof.required_elements) {
+            element_clear(*elem);
+            free(elem);
+        }
+        throw;
+    }
+    
+    return proof;
+}
+
 void padd_init(element_t pk, element_t sk, element_t g) {
     element_init_G2(g, PAIRING);
     element_init_G2(pk, PAIRING);
@@ -86,6 +326,7 @@ void padd_init(element_t pk, element_t sk, element_t g) {
 }
 
 bls_pkc* key_gen() {
+    pairing_init_set_buf(PAIRING, TYPEA_PARAMS, sizeof(TYPEA_PARAMS));
     bls_pkc* pkc = (bls_pkc*)malloc(sizeof(bls_pkc));
     pkc->pk = (bls_pk*)malloc(sizeof(bls_pk));
     pkc->sk = (bls_sk*)malloc(sizeof(bls_sk));
@@ -101,7 +342,7 @@ bls_pkc* key_gen() {
     return pkc;
 }
 
-void padd_clear(bls_pkc* pkc) {
+void free_pkc(bls_pkc* pkc) {
     element_clear(pkc->pk->spk);
     element_clear(pkc->pk->v);
     element_clear(pkc->sk->ssk);
@@ -119,44 +360,53 @@ element_t* sig_init(){
     return sig;
 }
 
-int bls_pkc_serialize(bls_pkc *pkc,  unsigned char *buf, size_t buf_len) {
-    if (!pkc || !buf || !PAIRING) return -1;
+// 序列化函数
+std::vector<std::byte> bls_pkc_serialize(bls_pkc* pkc) {
+    std::vector<std::byte> buf;
     
-    size_t offset = 0;
-    size_t needed = 0;
+    if (!pkc || !PAIRING) {
+        return buf; // 返回空vector表示错误
+    }
     
     // 计算所需空间
+    size_t needed = 0;
     needed += element_length_in_bytes(pkc->g);
     needed += element_length_in_bytes(pkc->pk->v);
     needed += element_length_in_bytes(pkc->pk->spk);
     needed += element_length_in_bytes(pkc->sk->alpha);
     needed += element_length_in_bytes(pkc->sk->ssk);
     
-    if (buf_len < needed) return -1;
+    // 预分配空间
+    buf.resize(needed);
+    
+    size_t offset = 0;
     
     // 序列化g
-    offset += element_to_bytes(buf + offset, pkc->g);
+    offset += element_to_bytes(reinterpret_cast<unsigned char*>(buf.data() + offset), pkc->g);
     
     // 序列化pk->v
-    offset += element_to_bytes(buf + offset, pkc->pk->v);
+    offset += element_to_bytes(reinterpret_cast<unsigned char*>(buf.data() + offset), pkc->pk->v);
     
     // 序列化pk->spk
-    offset += element_to_bytes(buf + offset, pkc->pk->spk);
+    offset += element_to_bytes(reinterpret_cast<unsigned char*>(buf.data() + offset), pkc->pk->spk);
     
     // 序列化sk->alpha
-    offset += element_to_bytes(buf + offset, pkc->sk->alpha);
+    offset += element_to_bytes(reinterpret_cast<unsigned char*>(buf.data() + offset), pkc->sk->alpha);
     
     // 序列化sk->ssk
-    offset += element_to_bytes(buf + offset, pkc->sk->ssk);
+    offset += element_to_bytes(reinterpret_cast<unsigned char*>(buf.data() + offset), pkc->sk->ssk);
     
-    return offset;
+    return buf;
 }
 
-bls_pkc* bls_pkc_deserialize(unsigned char *buf, size_t buf_len){
-    if (!buf || !PAIRING) return NULL;
+// 反序列化函数
+bls_pkc* bls_pkc_deserialize(const std::vector<std::byte>& buf) {
+    if (buf.empty() || !PAIRING) {
+        return nullptr;
+    }
     
-    bls_pkc *pkc = (bls_pkc*)malloc(sizeof(bls_pkc));
-    if (!pkc) return NULL;
+    bls_pkc* pkc = (bls_pkc*)malloc(sizeof(bls_pkc));
+    if (!pkc) return nullptr;
     
     pkc->pk = (bls_pk*)malloc(sizeof(bls_pk));
     pkc->sk = (bls_sk*)malloc(sizeof(bls_sk));
@@ -164,7 +414,7 @@ bls_pkc* bls_pkc_deserialize(unsigned char *buf, size_t buf_len){
         free(pkc->pk);
         free(pkc->sk);
         free(pkc);
-        return NULL;
+        return nullptr;
     }
     
     size_t offset = 0;
@@ -177,24 +427,24 @@ bls_pkc* bls_pkc_deserialize(unsigned char *buf, size_t buf_len){
     element_init_Zr(pkc->sk->ssk, PAIRING);
     
     // 反序列化g
-    offset += element_from_bytes(pkc->g, buf + offset);
+    offset += element_from_bytes(pkc->g, (unsigned char*)reinterpret_cast<const unsigned char*>(buf.data() + offset));
     
     // 反序列化pk->v
-    offset += element_from_bytes(pkc->pk->v, buf + offset);
+    offset += element_from_bytes(pkc->pk->v, (unsigned char*)reinterpret_cast<const unsigned char*>(buf.data() + offset));
     
     // 反序列化pk->spk
-    offset += element_from_bytes(pkc->pk->spk, buf + offset);
+    offset += element_from_bytes(pkc->pk->spk, (unsigned char*)reinterpret_cast<const unsigned char*>(buf.data() + offset));
     
     // 反序列化sk->alpha
-    offset += element_from_bytes(pkc->sk->alpha, buf + offset);
+    offset += element_from_bytes(pkc->sk->alpha, (unsigned char*)reinterpret_cast<const unsigned char*>(buf.data() + offset));
     
     // 反序列化sk->ssk
-    offset += element_from_bytes(pkc->sk->ssk, buf + offset);
+    offset += element_from_bytes(pkc->sk->ssk, (unsigned char*)reinterpret_cast<const unsigned char*>(buf.data() + offset));
     
     // 检查是否成功读取了所有数据
-    if (offset > buf_len) {
-        padd_clear(pkc);
-        return NULL;
+    if (offset > buf.size()) {
+        free_pkc(pkc);
+        return nullptr;
     }
     
     return pkc;
@@ -551,6 +801,94 @@ std::vector<std::pair<size_t, element_t*>> gen_chal(size_t n) {
     } catch (...) {
         // 清理已分配的元素
         for (auto& [num, elem] : challenges) {
+            element_clear(*elem);
+            free(elem);
+        }
+        throw;
+    }
+    
+    return challenges;
+}
+
+// 序列化函数
+std::vector<std::byte> chal_serialize(const std::vector<std::pair<size_t, element_t*>>& challenges) {
+    std::vector<std::byte> buf;
+    
+    if (challenges.empty()) {
+        return buf; // 返回空vector表示错误
+    }
+    
+    // 1. 计算所需总空间
+    size_t total_size = 0;
+    
+    // 每个挑战需要: sizeof(size_t) + element长度
+    for (const auto& [index, elem] : challenges) {
+        total_size += sizeof(size_t);
+        total_size += element_length_in_bytes(*elem);
+    }
+    
+    // 2. 预分配空间
+    buf.resize(total_size);
+    size_t offset = 0;
+    
+    // 3. 序列化每个挑战
+    for (const auto& [index, elem] : challenges) {
+        // 序列化索引 (size_t)
+        std::memcpy(buf.data() + offset, &index, sizeof(size_t));
+        offset += sizeof(size_t);
+        
+        // 序列化元素
+        offset += element_to_bytes(reinterpret_cast<unsigned char*>(buf.data() + offset), *elem);
+    }
+    
+    return buf;
+}
+
+// 反序列化函数
+std::vector<std::pair<size_t, element_t*>> chal_deserialize(const std::vector<std::byte>& buf) {
+    std::vector<std::pair<size_t, element_t*>> challenges;
+    
+    if (buf.empty()) {
+        return challenges; // 返回空vector表示错误
+    }
+    
+    size_t offset = 0;
+    const size_t buf_size = buf.size();
+    
+    try {
+        while (offset < buf_size) {
+            // 1. 反序列化索引
+            if (offset + sizeof(size_t) > buf_size) {
+                throw std::runtime_error("Invalid buffer: incomplete index data");
+            }
+            
+            size_t index;
+            std::memcpy(&index, buf.data() + offset, sizeof(size_t));
+            offset += sizeof(size_t);
+            
+            // 2. 反序列化元素
+            element_t* elem = (element_t*)malloc(sizeof(element_t));
+            if (!elem) {
+                throw std::runtime_error("Memory allocation failed");
+            }
+            
+            element_init_Zr(*elem, PAIRING);
+            
+            size_t elem_len = element_from_bytes(*elem, (unsigned char*)reinterpret_cast<const unsigned char*>(buf.data() + offset));
+            if (elem_len == 0) {
+                element_clear(*elem);
+                free(elem);
+                throw std::runtime_error("Failed to deserialize element");
+            }
+            
+            offset += elem_len;
+            
+            // 3. 添加到结果
+            challenges.emplace_back(index, elem);
+        }
+    } catch (...) {
+        // 清理已分配的元素
+        for (auto& [index, elem] : challenges) {
             element_clear(*elem);
             free(elem);
         }
