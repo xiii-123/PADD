@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(padd_01)
+project(padd)  # 修改项目名
 
 # 设置C++标准
 set(CMAKE_CXX_STANDARD 17)
@@ -11,32 +11,40 @@ include_directories(
     $ENV{HOME}/.local/include/pbc
 )
 
-# 定义可执行文件及其源文件
-add_executable(padd_01
-    src/main.cpp
+# 创建动态库，直接命名为padd
+add_library(padd SHARED  # 直接使用padd作为目标名
     src/padd_01.cpp
     src/utils.cpp
     src/vrf.cpp
 )
 
-# 设置可执行文件的运行时路径
-set_target_properties(padd_01 PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+# 设置库的输出目录
+set_target_properties(padd PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
+    VERSION 1.0.0
+    SOVERSION 1
 )
 
 # 添加库搜索路径
 link_directories($ENV{HOME}/.local/lib)
 
 # 链接所需的库
-target_link_libraries(padd_01
+target_link_libraries(padd
     pbc
     gmp
     crypto
     stdc++fs
 )
 
+# 可选：如果需要可执行文件
+add_executable(padd_test src/main.cpp)
+target_link_libraries(padd_test padd)
+set_target_properties(padd_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
 # 设置运行时路径
-set_target_properties(padd_01 PROPERTIES
+set_target_properties(padd PROPERTIES
     INSTALL_RPATH "$ENV{HOME}/.local/lib"
 )
 
@@ -53,14 +61,15 @@ set_target_properties(padd_01 PROPERTIES
 #     $ENV{HOME}/.local/include/pbc
 # )
 
-# # 定义主可执行文件及其源文件
+# # 定义可执行文件及其源文件
 # add_executable(padd_01
 #     src/main.cpp
 #     src/padd_01.cpp
 #     src/utils.cpp
+#     src/vrf.cpp
 # )
 
-# # 设置主可执行文件的运行时路径
+# # 设置可执行文件的运行时路径
 # set_target_properties(padd_01 PROPERTIES
 #     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 # )
@@ -68,7 +77,7 @@ set_target_properties(padd_01 PROPERTIES
 # # 添加库搜索路径
 # link_directories($ENV{HOME}/.local/lib)
 
-# # 链接主可执行文件所需的库
+# # 链接所需的库
 # target_link_libraries(padd_01
 #     pbc
 #     gmp
@@ -76,48 +85,7 @@ set_target_properties(padd_01 PROPERTIES
 #     stdc++fs
 # )
 
-# # 设置主可执行文件的运行时路径
+# # 设置运行时路径
 # set_target_properties(padd_01 PROPERTIES
 #     INSTALL_RPATH "$ENV{HOME}/.local/lib"
 # )
-
-# # 启用测试
-# enable_testing()
-
-# # 检查测试目录是否存在
-# if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test/test.cpp)
-#     # 添加Google Test子目录 - 使用正确的配置方式
-#     add_subdirectory(lib/googletest)
-    
-#     # 确保googletest目标已创建
-#     if(TARGET gtest AND TARGET gtest_main)
-#         # 定义测试可执行文件
-#         add_executable(padd_01_test
-#             test/test.cpp
-#             src/padd_01.cpp
-#             src/utils.cpp
-#         )
-
-#         # 设置测试可执行文件的输出目录
-#         set_target_properties(padd_01_test PROPERTIES
-#             RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-#         )
-
-#         # 链接测试可执行文件所需的库
-#         target_link_libraries(padd_01_test
-#             pbc
-#             gmp
-#             crypto
-#             stdc++fs
-#             gtest
-#             gtest_main
-#         )
-
-#         # 将测试添加到CTest
-#         add_test(NAME padd_01_test COMMAND ${CMAKE_BINARY_DIR}/bin/padd_01_test)
-#     else()
-#         message(WARNING "Google Test targets not found - skipping test configuration")
-#     endif()
-# else()
-#     message(WARNING "Test file test/test.cpp not found - skipping test configuration")
-# endif()

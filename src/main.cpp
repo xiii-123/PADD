@@ -66,16 +66,26 @@ void test_serialize_pkc(){
     element_printf("alpha: %B\n", pkc->sk->alpha);
 
 
-    auto buf = bls_pkc_serialize(pkc);
+    // auto buf = bls_pkc_serialize(pkc);
+    auto pk_buf = bls_pk_serialize(pkc->pk, pkc->g);
+    auto sk_buf = bls_sk_serialize(pkc->sk);
 
-    bls_pkc* desirialized_pkc = bls_pkc_deserialize(buf);
-    element_printf("g: %B\n", desirialized_pkc->g);
-    element_printf("pk: %B\n", desirialized_pkc->pk->spk);
-    element_printf("sk: %B\n", desirialized_pkc->sk->ssk);
-    element_printf("v: %B\n", desirialized_pkc->pk->v);
-    element_printf("alpha: %B\n", desirialized_pkc->sk->alpha);
+    // bls_pkc* desirialized_pkc = bls_pkc_deserialize(buf);
+    bls_pkc* pkc2 = (bls_pkc*)malloc(sizeof(bls_pkc));
+    pkc2->pk = (bls_pk*)malloc(sizeof(bls_pk));
+    pkc2->sk = (bls_sk*)malloc(sizeof(bls_sk));
+    bool ok1 = bls_pk_deserialize(pkc2->pk, pkc2->g, pk_buf);
+    bool ok2 = bls_sk_deserialize(pkc2->sk, sk_buf);
+
+
+    element_printf("g: %B\n", pkc2->g);
+    element_printf("pk: %B\n", pkc2->pk->spk);
+    element_printf("sk: %B\n", pkc2->sk->ssk);
+    element_printf("v: %B\n", pkc2->pk->v);
+    element_printf("alpha: %B\n", pkc2->sk->alpha);
 
     free_pkc(pkc);
+    free_pkc(pkc2);
 }
 
 void test_padd01() {
@@ -117,7 +127,7 @@ void test_padd01() {
 
     auto[flag, u] = deserialize_t(t, pkc->g, pkc->pk->spk);
 
-    auto chal = gen_chal(4);
+    auto chal = gen_chal(8);
 
     // for (auto i : chal){
     //     element_printf("v_%d in chal: %B\n",i.first, i.second);

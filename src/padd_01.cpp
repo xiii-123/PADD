@@ -450,6 +450,132 @@ bls_pkc* bls_pkc_deserialize(const std::vector<std::byte>& buf) {
     return pkc;
 }
 
+std::vector<std::byte> bls_pk_serialize(bls_pk * pk, element_t g) {
+    std::vector<std::byte> buf;
+
+    if (!pk || !PAIRING) {
+        return buf;
+    }
+
+    size_t needed = 0;
+    needed += element_length_in_bytes(g);
+    needed += element_length_in_bytes(pk->v);
+    needed += element_length_in_bytes(pk->spk);
+
+    buf.resize(needed);
+
+    size_t offset = 0;
+
+    offset += element_to_bytes(
+        reinterpret_cast<unsigned char*>(buf.data() + offset),
+        g
+    );
+
+    offset += element_to_bytes(
+        reinterpret_cast<unsigned char*>(buf.data() + offset),
+        pk->v
+    );
+
+    offset += element_to_bytes(
+        reinterpret_cast<unsigned char*>(buf.data() + offset),
+        pk->spk
+    );
+
+    return buf;
+}
+
+bool bls_pk_deserialize(
+    bls_pk * pk, element_t g,
+    const std::vector<std::byte>& buf
+) {
+    if (!pk || buf.empty() || !PAIRING) {
+        return false;
+    }
+
+    if (!pk) {
+        pk = (bls_pk*)malloc(sizeof(bls_pk));
+        if (!pk) return false;
+    }
+
+    size_t offset = 0;
+
+    element_init_G1(g, PAIRING);
+    element_init_G1(pk->v, PAIRING);
+    element_init_G2(pk->spk, PAIRING);
+
+    offset += element_from_bytes(
+        g,
+        (unsigned char*)reinterpret_cast<const unsigned char*>(buf.data() + offset)
+    );
+
+    offset += element_from_bytes(
+        pk->v,
+        (unsigned char*)reinterpret_cast<const unsigned char*>(buf.data() + offset)
+    );
+
+    offset += element_from_bytes(
+        pk->spk,
+        (unsigned char*)reinterpret_cast<const unsigned char*>(buf.data() + offset)
+    );
+
+    return offset == buf.size();
+}
+
+std::vector<std::byte> bls_sk_serialize(bls_sk* sk) {
+    std::vector<std::byte> buf;
+
+    if (!sk || !PAIRING) {
+        return buf;
+    }
+
+    size_t needed = 0;
+    needed += element_length_in_bytes(sk->alpha);
+    needed += element_length_in_bytes(sk->ssk);
+
+    buf.resize(needed);
+
+    size_t offset = 0;
+
+    offset += element_to_bytes(
+        reinterpret_cast<unsigned char*>(buf.data() + offset),
+        sk->alpha
+    );
+
+    offset += element_to_bytes(
+        reinterpret_cast<unsigned char*>(buf.data() + offset),
+        sk->ssk
+    );
+
+    return buf;
+}
+
+bool bls_sk_deserialize(
+    bls_sk* sk,
+    const std::vector<std::byte>& buf
+) {
+    if (!sk || buf.empty() || !PAIRING) {
+        return false;
+    }
+
+    size_t offset = 0;
+
+    element_init_Zr(sk->alpha, PAIRING);
+    element_init_Zr(sk->ssk, PAIRING);
+
+    offset += element_from_bytes(
+        sk->alpha,
+        (unsigned char*)reinterpret_cast<const unsigned char*>(buf.data() + offset)
+    );
+
+    offset += element_from_bytes(
+        sk->ssk,
+        (unsigned char*)reinterpret_cast<const unsigned char*>(buf.data() + offset)
+    );
+
+    return offset == buf.size();
+}
+
+
 std::string construct_t(bls_pkc& pkc, const std::string& file_name, size_t n,  element_t u) {
     // 第一步：拼接文件名、n和u
     std::ostringstream oss;
@@ -774,6 +900,7 @@ std::vector<size_t> select_random_numbers(size_t n, size_t k = 0) {
 }
 
 // 生成挑战，直接返回pair向量
+// TODO: 根据随机种子产生确定的挑战
 std::vector<std::pair<size_t, element_t*>> gen_chal(size_t n) {
 
     if (n == 0) {
@@ -1152,7 +1279,6 @@ Proof gen_proof(std::fstream& f,
 
     auto required_elements = get_requeired_elements(f, extract_first(chal), shard_size);
 
-
     // return Proof(mu, sigma, merkle_proof, sig_mht, extract_first(chal));
     auto indices = extract_first(chal);
     return Proof(mu, sigma, merkle_proofs, required_elements, tree.get_root_hash(), sig_mht, indices);
@@ -1163,9 +1289,11 @@ bool authentication(Proof &proof, bls_pkc& pkc){
     element_t g_alpha;
     element_t hash_mht;
     element_init_G1(hash_mht, PAIRING);
-    element_init_G2(g_alpha, PAIRING);
-    element_set(g_alpha, pkc.g);
-    element_pow_zn(g_alpha, g_alpha, pkc.sk->alpha);
+    element_init_same_as(g_alpha, pkc.pk->v);
+    element_set(g_alpha, pkc.pk->v);
+    // element_init_G2(g_alpha, PAIRING);
+    // element_set(g_alpha, pkc.g);
+    // element_pow_zn(g_alpha, g_alpha, pkc.sk->alpha);
     element_init_GT(temp1, PAIRING);
     element_init_GT(temp2, PAIRING);
 
@@ -1235,7 +1363,6 @@ element_t* calculate_product_proof(const std::vector<element_t*>& m_hashes, cons
 }
 
 bool verify(bls_pkc& pkc, std::vector<std::pair<size_t, element_t*>>& chal, Proof &proof,element_t u){  
-    // std::cout << "authentication: " << authentication(proof, pkc) << std::endl;
     // 1. merkle hash root 验证以及身份验证
     if (!authentication(proof, pkc)) return false;
     // element_printf("u: %B\n", u);
@@ -1243,19 +1370,15 @@ bool verify(bls_pkc& pkc, std::vector<std::pair<size_t, element_t*>>& chal, Proo
     // 2. 证明验证
     element_t temp1, temp2;
     element_t temp3;
-    element_t test_temp;
     
     element_init_GT(temp1, PAIRING);
     element_init_GT(temp2, PAIRING);
     element_init_G1(temp3, PAIRING);
-    element_init_G1(test_temp, PAIRING);
 
     element_pairing(temp1, proof.sigma, pkc.g);
-    // auto temp4 = calculate_product_proof(proof.merkle_proofs.first, chal);
     auto temp4 = calculate_product_proof(proof.required_elements, chal);
     element_pow_zn(temp3, u, proof.mu);
     element_mul(temp3, *temp4, temp3);
-    element_pow_zn(test_temp, temp3, pkc.sk->alpha);
 
     element_pairing(temp2, temp3, pkc.pk->v);
 

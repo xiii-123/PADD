@@ -97,3 +97,17 @@ bool verify(bls_pkc& pkc,
 std::vector<std::byte> bls_pkc_serialize(bls_pkc* pkc);
 
 bls_pkc* bls_pkc_deserialize(const std::vector<std::byte>& buf);
+
+std::vector<std::byte> bls_pk_serialize(bls_pk * pk, element_t g);
+
+bool bls_pk_deserialize(
+    bls_pk * pk, element_t g,
+    const std::vector<std::byte>& buf
+);
+
+std::vector<std::byte> bls_sk_serialize(bls_sk* sk);
+
+bool bls_sk_deserialize(
+    bls_sk* sk,
+    const std::vector<std::byte>& buf
+);
